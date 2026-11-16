@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
-from . import audio, motion, sysinfo, weather, win
+from . import audio, motion, shortcuts, sysinfo, weather, win
 from . import look as L
 from . import suitetheme as _theme
 from .card import Card
@@ -306,6 +306,12 @@ class AppsTile(Tile):
         self.soon.setInterval(40)
         self.soon.timeout.connect(self.refresh)
         self.last_frame = time.perf_counter()
+        self.dropping: list[str] = []             # files dragged over the apps
+        self.drop_dwell = QTimer(self)            # a file held over an open app brings its window forward
+        self.drop_dwell.setSingleShot(True)
+        self.drop_dwell.setInterval(700)
+        self.drop_dwell.timeout.connect(self.raise_for_drop)
+        self.setAcceptDrops(True)
         # as wide as its apps (the dock is a compact bar that grows with them), narrower if it must
         self.setMinimumWidth(0)
         self.setMaximumWidth(16777215)
@@ -420,10 +426,16 @@ class AppsTile(Tile):
         windows = win.app_windows(os.getpid())
         windows = [w for w in windows if self.dock.shows_window(w.hwnd)]      # Windows' per-display setting
         groups: dict[str, win.Group] = {}
+        program_pins: dict[str, str] = {}         # a program's windows show on the shortcut pinned for it
         for path in (self.dock.cfg['pinned'] if self.dock.shows_pinned() else []):
             groups[path.lower()] = win.Group(path, pinned=True)
+            program = shortcuts.program_of(path)
+            if program and program != path.lower() and not shortcuts.web_app(path):
+                program_pins.setdefault(program, path.lower())
         for window in windows:
             key = (window.path or f'window:{window.hwnd}').lower()
+            if key not in groups:
+                key = program_pins.get(key, key)
             group = groups.get(key)
             if group is None:
                 group = groups[key] = win.Group(window.path)
@@ -729,6 +741,9 @@ class AppsTile(Tile):
         if group.windows:
             label = 'Close window' if len(group.windows) == 1 else 'Close all windows'
             menu.addAction(label, lambda: [win.close(w.hwnd) for w in group.windows])
+            pids = {w.pid for w in group.windows if w.pid and not w.path.lower().endswith('\\explorer.exe')}
+            if pids:
+                menu.addAction('End task', lambda: [win.end_process(pid) for pid in pids])
         menu.addSeparator()
 
     def pin(self, path: str, on: bool):
@@ -738,6 +753,91 @@ class AppsTile(Tile):
         self.dock.cfg['pinned'] = pinned
         self.dock.cfg.save()
         self.refresh()
+
+    # -- files dragged onto the apps: held over an open app, its window comes forward (as on the
+    #    taskbar); dropped on an app, they open in it; programs and shortcuts dropped are pinned
+    @staticmethod
+    def dragged_files(mime) -> list[str]:
+        if not mime.hasUrls():
+            return []
+        return [os.path.normpath(url.toLocalFile()) for url in mime.urls() if url.isLocalFile()]
+
+    @staticmethod
+    def all_programs(files: list[str]) -> bool:
+        return bool(files) and all(f.lower().endswith(shortcuts.PROGRAMS) for f in files)
+
+    def dragEnterEvent(self, event):
+        files = self.dragged_files(event.mimeData())
+        if not files or self.dock.editing:
+            event.ignore()
+            return
+        self.dropping = files
+        self.dock.dropping = True
+        event.acceptProposedAction()
+        self.drag_over(event.position().toPoint())
+
+    def dragMoveEvent(self, event):
+        if not self.dropping:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.drag_over(event.position().toPoint())
+
+    def drag_over(self, pos: QPoint) -> None:
+        index = self.index_at(pos)
+        if index == self.hover_index:
+            return
+        self.hover_index = index
+        self.lit = 0.0
+        self.fade('lit', 1.0, motion.HOVER_MS)
+        self.drop_dwell.stop()
+        if index >= 0 and self.groups[index].windows and not self.all_programs(self.dropping):
+            self.drop_dwell.start()
+
+    def raise_for_drop(self) -> None:
+        if self.dropping and 0 <= self.hover_index < len(self.groups) and self.groups[self.hover_index].windows:
+            win.activate(self.groups[self.hover_index].windows[0].hwnd)
+
+    def end_drop(self) -> None:
+        self.dropping = []
+        self.dock.dropping = False
+        self.drop_dwell.stop()
+        self.hover_index = -1
+        self.fade('lit', 0.0, motion.HOVER_MS)
+
+    def dragLeaveEvent(self, event):
+        self.end_drop()
+
+    def dropEvent(self, event):
+        files = self.dropping or self.dragged_files(event.mimeData())
+        index = self.index_at(event.position().toPoint())
+        self.end_drop()
+        if not files:
+            event.ignore()
+            return
+        if self.all_programs(files):
+            for path in files:
+                if not any(p.lower() == path.lower() for p in self.dock.cfg['pinned']):
+                    self.pin(shortcuts.keep(path), True)
+            event.acceptProposedAction()
+            return
+        if 0 <= index < len(self.groups) and self.open_with(self.groups[index], files):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def open_with(self, group: win.Group, files: list[str]) -> bool:
+        """Open files in an app: its pinned shortcut's program with the shortcut's own arguments, or
+        the program its windows belong to."""
+        shortcut = shortcuts.read(group.path) if group.path else shortcuts.Shortcut('')
+        program = shortcuts.program_of(group.path) if group.path else ''
+        arguments = shortcut.arguments if program and shortcut.target.lower() == program else ''
+        if not program and group.windows and group.windows[0].path.lower().endswith('.exe'):
+            program = group.windows[0].path
+        if not program:
+            return False
+        line = ' '.join(part for part in [arguments] + [shortcuts.quote(f) for f in files] if part)
+        return win.shell_open(program, line, shortcut.working_dir or None)
 
 
 class SearchTile(Tile):
@@ -1019,6 +1119,104 @@ class TrayTile(Tile):
 
     def click(self, pos):
         self.dock.open_tray()
+
+
+IME_MODES = {'zh': ('中', '英'), 'ja': ('あ', 'A'), 'ko': ('가', 'A')}     # the taskbar's own marks
+
+
+class LanguageTile(Tile):
+    ID, NAME, GROUP = 'language', 'Keyboard Language', 'System'
+    ABOUT = 'The input language of the window in front, as the taskbar shows it. A click switches the language ' \
+            'or the input mode.'
+    WIDTH = 1.3
+
+    def setup(self):
+        self.shown = ('', '')
+        self.target = 0                           # the window the language is for (the dock never takes the keyboard)
+        self.watch = QTimer(self)                 # Win+Space or Shift change it at any time
+        self.watch.setInterval(350)
+        self.watch.timeout.connect(self.tick)
+        if not self.dock.testing:
+            self.watch.start()
+
+    def reading(self) -> tuple[str, str]:
+        if self.dock.testing:
+            return 'ENG', 'US'
+        front = win.foreground()
+        if front and win.window_pid(front) != os.getpid():
+            self.target = front
+        locale = win.locale_of(win.keyboard_of(self.target))
+        language = locale.split('-')[0].lower()
+        code = (win.locale_info(locale, win.LOCALE_SISO639LANGNAME2) or language or '?').upper()
+        region = win.locale_info(locale, win.LOCALE_SISO3166CTRYNAME)
+        if language in IME_MODES:
+            native = win.ime_native(self.target)
+            if native is not None:
+                return IME_MODES[language][0 if native else 1], region
+        return code, region
+
+    def tick(self):
+        if not self.isVisible() and not self.dock.testing:
+            return
+        shown = self.reading()
+        if shown != self.shown:
+            self.shown = shown
+            self.update()
+
+    def paint(self, painter, rect, look):
+        if not self.shown[0]:
+            self.shown = self.reading()
+        main, sub = self.shown
+        self.lines(painter, rect, main, sub, Qt.AlignHCenter)
+        self.setToolTip('Input language')
+
+    def click(self, pos):
+        target = self.target if not self.dock.testing else 0
+        current = win.keyboard_of(target) if target else 0
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(_label('Input language', 'title'))
+        layout.addSpacing(8)
+
+        def back_to_window():
+            if self.card:
+                self.card.close()
+            if target:
+                win.activate(target)
+
+        def use(_=False, hkl=0):
+            back_to_window()
+            if target:
+                win.switch_keyboard(target, hkl)
+            QTimer.singleShot(150, self.tick)
+
+        for hkl in (win.keyboards() if not self.dock.testing else []):
+            name = win.locale_info(win.locale_of(hkl), win.LOCALE_SLOCALIZEDDISPLAYNAME) or hex(hkl)
+            row = _button(name, lambda _=False, h=hkl: use(hkl=h), 'row', checkable=True)
+            row.setChecked(hkl == current)
+            layout.addWidget(row)
+        language = win.locale_of(current).split('-')[0].lower() if current else ''
+        native = win.ime_native(target) if target and language in IME_MODES else None
+        if native is not None:
+            layout.addSpacing(8)
+            layout.addWidget(_label('Input mode', 'sub'))
+            name = win.locale_info(win.locale_of(current), win.LOCALE_SLOCALIZEDDISPLAYNAME).split(' (')[0]
+
+            def mode(_=False, on=True):
+                back_to_window()
+                win.set_ime_native(target, on)
+                QTimer.singleShot(150, self.tick)
+
+            for on, label in ((True, f'{IME_MODES[language][0]}  {name}'), (False, f'{IME_MODES[language][1]}  English')):
+                row = _button(label, lambda _=False, o=on: mode(on=o), 'row', checkable=True)
+                row.setChecked(native == on)
+                layout.addWidget(row)
+        layout.addSpacing(8)
+        layout.addWidget(_button('Language settings', lambda: (self.card and self.card.close(),
+                                                               _open('ms-settings:regionlanguage')), 'row'))
+        self.open_card(content, 300)
 
 
 class ShowDesktopTile(Tile):
@@ -1805,7 +2003,7 @@ class WeatherTile(Tile):
 
 WIDGETS: list[type[Tile]] = [
     StartTile, TaskViewTile, AppsTile, SearchTile, RecycleTile, StorageTile, ScreenshotTile,
-    ProcessorTile, MemoryTile, NetworkTile, BatteryTile, TrayTile, QuickSettingsTile, NotificationsTile, ShowDesktopTile,
+    ProcessorTile, MemoryTile, NetworkTile, BatteryTile, TrayTile, LanguageTile, QuickSettingsTile, NotificationsTile, ShowDesktopTile,
     ThemeTile, DayProgressTile,
     MediaTile, VolumeTile,
     TimerTile, StopwatchTile, PomodoroTile, NotesTile,

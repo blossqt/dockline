@@ -164,6 +164,25 @@ class SettingsWindow(QWidget):
                    'The dock appears when the pointer reaches the edge of the screen, except over '
                    'full-screen apps.')
         self.check(system, 'Start with Windows', 'startup', 'startup')
+        pins_row = QHBoxLayout()
+        import_pins = QPushButton('Import taskbar pins')
+        import_pins.setFocusPolicy(Qt.NoFocus)
+        import_pins.setCursor(Qt.PointingHandCursor)
+        pins_row.addWidget(import_pins)
+        pins_row.addStretch(1)
+        system.addLayout(pins_row)
+        pins_note = QLabel('Adds the apps pinned to the Windows taskbar to the dock. Programs and shortcuts '
+                           'dragged onto the dock are pinned too.')
+        pins_note.setObjectName('sub')
+        pins_note.setWordWrap(True)
+        system.addWidget(pins_note)
+
+        def import_now():
+            added = self.dock.import_taskbar_pins()
+            pins_note.setText('No new pinned apps found on the Windows taskbar.' if added == 0 else
+                              f'{added} pinned {"app" if added == 1 else "apps"} added to the dock.')
+
+        import_pins.clicked.connect(import_now)
         displays = QLabel('On more than one display, Dockline follows the Windows taskbar settings '
                           '"Show my taskbar on all displays" and "Show my taskbar apps on".')
         displays.setObjectName('sub')

@@ -42,7 +42,7 @@ def _render(folder: Path, offscreen: bool) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setFont(L.font(14))
     folder.mkdir(parents=True, exist_ok=True)
-    card_tiles = ('search', 'recycle', 'volume', 'timer', 'stopwatch', 'pomodoro', 'notes', 'clock')
+    card_tiles = ('search', 'recycle', 'volume', 'timer', 'stopwatch', 'pomodoro', 'notes', 'clock', 'language')
     failures = 0
     for name in L.STYLES:
         for size in ('S', 'M', 'L') if name == 'black' else ('M',):

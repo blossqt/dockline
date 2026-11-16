@@ -19,7 +19,7 @@ from . import suitetheme as theme
 from . import uia, win
 from .taskbar import Taskbar
 from .weather import Weather
-from .config import NEW_WIDGETS
+from .config import NEW_WIDGETS, ONLY_WITH_TWO_KEYBOARDS
 from .widgets import REGISTRY
 
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
@@ -82,6 +82,7 @@ class Dock(QWidget):
         self.peek.setInterval(60)
         self.peek.timeout.connect(self.watch_pointer)
         self.editing = False
+        self.dropping = False                 # files are dragged over the apps
         self.appbar: win.AppBar | None = None
         self.taskbar = Taskbar(cfg)
         self.weather = Weather()
@@ -121,6 +122,8 @@ class Dock(QWidget):
         self.full_watch.timeout.connect(self.check_full_screen)
         if main:
             self.offer_new_widgets()
+            if not testing and not cfg['pins_imported']:
+                self.import_taskbar_pins()
         self.apply()
 
     # ------------------------------------------------------------ state
@@ -132,6 +135,9 @@ class Dock(QWidget):
             if key in self.cfg['offered']:
                 continue
             self.cfg['offered'] = self.cfg['offered'] + [key]
+            if key in ONLY_WITH_TWO_KEYBOARDS and (self.testing or len(win.keyboards()) < 2):
+                changed = True
+                continue
             if key not in self.cfg['widgets']:
                 widgets = list(self.cfg['widgets'])
                 widgets.insert(widgets.index(before) if before in widgets else len(widgets), key)
@@ -139,6 +145,29 @@ class Dock(QWidget):
             changed = True
         if changed and not self.testing:
             self.cfg.save()
+
+    def import_taskbar_pins(self) -> int:
+        """Bring the Windows taskbar's pinned apps onto the dock (once by itself, and from Settings):
+        each shortcut is copied into Dockline's folder and pinned after those already there."""
+        from . import shortcuts
+        pinned = list(self.cfg['pinned'])
+        known = {shortcuts.program_of(p) or p.lower() for p in pinned}
+        added = 0
+        for path in shortcuts.taskbar_pins():
+            program = shortcuts.program_of(path) or path.lower()
+            if program in known or any(os.path.basename(p).lower() == os.path.basename(path).lower() for p in pinned):
+                continue
+            pinned.append(shortcuts.keep(path))
+            known.add(program)
+            added += 1
+        self.cfg['pinned'] = pinned
+        self.cfg['pins_imported'] = True
+        if not self.testing:
+            self.cfg.save()
+        for tile in self.tiles:
+            if tile.ID == 'apps':
+                tile.refresh()
+        return added
 
     @property
     def look(self) -> L.Look:
@@ -455,7 +484,7 @@ class Dock(QWidget):
 
     def busy(self) -> bool:
         """Something of the dock's is open or held: it stays out."""
-        if self.moving or self.editing or self.sliding or QApplication.activePopupWidget() is not None:
+        if self.moving or self.editing or self.sliding or self.dropping or QApplication.activePopupWidget() is not None:
             return True
         if self.settings_window is not None and self.settings_window.isVisible():
             return True                              # Settings open: the dock stays out to be seen
@@ -508,7 +537,9 @@ class Dock(QWidget):
                 at_edge = pos.y() <= g.top() or (room.top() > g.top() and abs(pos.y() - room.top()) <= 1)
             else:                                    # the screen's edge, or the Windows taskbar's top
                 at_edge = pos.y() >= g.bottom() - 1 or (room.bottom() < g.bottom() and abs(pos.y() - room.bottom()) <= 1)
-            if inside and at_edge and not win.left_button_down() \
+            # a held button keeps it away (a window dragged to the edge), unless a file is being dragged
+            # down to the dock, to be dropped on an app
+            if inside and at_edge and (not win.left_button_down() or win.dragging_files()) \
                     and not win.full_screen_in_front(os.getpid(), self.device or None):
                 self.place()                     # where it rests now (while still tucked)
                 self.tucked = False

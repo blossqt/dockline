@@ -194,7 +194,9 @@ def shell_in_front() -> bool:
 
 # ---------------------------------------------------------------- top-level windows
 
-GWL_EXSTYLE = -20
+GWL_EXSTYLE, GWL_STYLE = -20, -16
+WS_CAPTION = 0x00C00000
+user32.IsZoomed.argtypes = [HWND]
 WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_NOACTIVATE = 0x80, 0x40000, 0x08000000
 GW_OWNER = 4
 DWMWA_CLOAKED = 14
@@ -431,6 +433,11 @@ def full_screen_in_front(own_pid: int, device: str | None = None) -> bool:
     cls = _class_name(hwnd)
     if cls in DESKTOP_CLASSES or cls in START_CLASSES or window_pid(hwnd) == own_pid:
         return False
+    if user32.IsZoomed(hwnd):
+        return False                     # maximised (a browser, an editor): with the taskbar hidden it also
+                                         # covers the screen, but the dock must still come up over it
+    if user32.GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CAPTION == WS_CAPTION:
+        return False                     # a window with a title bar is not a game or a full-screen video
     info = _MonitorInfo()
     info.cbSize = ctypes.sizeof(info)
     monitor = user32.MonitorFromWindow(hwnd, 2)              # MONITOR_DEFAULTTONEAREST
@@ -521,6 +528,121 @@ def taskbar_settings_now() -> tuple[bool, int]:
 
 def left_button_down() -> bool:
     return bool(user32.GetAsyncKeyState(0x01) & 0x8000)
+
+
+def dragging_files() -> bool:
+    """A file is being dragged somewhere on screen: Windows draws its picture in a window of its own."""
+    hwnd = user32.FindWindowW('SysDragImage', None)
+    return bool(hwnd and user32.IsWindowVisible(hwnd)) and left_button_down()
+
+
+# ---------------------------------------------------------------- starting and ending programs
+
+shell32.ShellExecuteW.argtypes = [HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                  ctypes.c_int]
+shell32.ShellExecuteW.restype = ctypes.c_ssize_t
+
+
+def shell_open(program: str, arguments: str = '', folder: str | None = None) -> bool:
+    """Start a program (or open a file) with arguments, as Explorer would."""
+    return shell32.ShellExecuteW(None, 'open', program, arguments or None, folder or None, 1) > 32
+
+
+def end_process(pid: int) -> bool:
+    """End a program at once (the taskbar's End task)."""
+    handle = kernel32.OpenProcess(0x0001, False, pid)          # PROCESS_TERMINATE
+    if not handle:
+        return False
+    try:
+        return bool(kernel32.TerminateProcess(handle, 1))
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+# ---------------------------------------------------------------- keyboard languages and input methods
+
+imm32 = ctypes.WinDLL('imm32')
+imm32.ImmGetDefaultIMEWnd.argtypes = [HWND]
+imm32.ImmGetDefaultIMEWnd.restype = HWND
+user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+user32.GetKeyboardLayout.restype = ctypes.c_void_p
+user32.GetKeyboardLayoutList.argtypes = [ctypes.c_int, ctypes.POINTER(ctypes.c_void_p)]
+user32.GetKeyboardLayoutList.restype = ctypes.c_int
+kernel32.LCIDToLocaleName.argtypes = [wintypes.DWORD, wintypes.LPWSTR, ctypes.c_int, wintypes.DWORD]
+kernel32.GetLocaleInfoEx.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPWSTR, ctypes.c_int]
+
+WM_INPUTLANGCHANGEREQUEST, WM_IME_CONTROL = 0x50, 0x283
+IMC_GETCONVERSIONMODE, IMC_SETCONVERSIONMODE, IMC_GETOPENSTATUS, IMC_SETOPENSTATUS = 1, 2, 5, 6
+LOCALE_SLOCALIZEDDISPLAYNAME, LOCALE_SISO639LANGNAME2, LOCALE_SISO3166CTRYNAME = 0x2, 0x67, 0x5A
+LOCALE_SNATIVELANGUAGENAME = 0x4
+
+
+def keyboard_of(hwnd) -> int:
+    """The keyboard layout (HKL) a window's thread types with."""
+    thread = user32.GetWindowThreadProcessId(hwnd, None) if hwnd else 0
+    return int(user32.GetKeyboardLayout(thread) or 0)
+
+
+def keyboards() -> list[int]:
+    """Every keyboard layout set up in Windows, in its order."""
+    count = user32.GetKeyboardLayoutList(0, None)
+    if count <= 0:
+        return []
+    found = (ctypes.c_void_p * count)()
+    count = user32.GetKeyboardLayoutList(count, found)
+    return [int(value or 0) for value in found[:count]]
+
+
+def locale_of(hkl: int) -> str:
+    """The language a layout is for, as a locale name ('en-US', 'zh-CN')."""
+    buffer = ctypes.create_unicode_buffer(85)
+    if kernel32.LCIDToLocaleName(hkl & 0xFFFF, buffer, 85, 0):
+        return buffer.value
+    return ''
+
+
+def locale_info(name: str, kind: int) -> str:
+    buffer = ctypes.create_unicode_buffer(128)
+    if name and kernel32.GetLocaleInfoEx(name, kind, buffer, 128):
+        return buffer.value
+    return ''
+
+
+def _ime_ask(ime, what: int, value: int = 0):
+    result = ctypes.c_size_t()
+    if not user32.SendMessageTimeoutW(ime, WM_IME_CONTROL, what, value, 0x2, 60, ctypes.byref(result)):
+        return None
+    return int(result.value)
+
+
+def ime_native(hwnd) -> bool | None:
+    """Whether a window's input method types its own language (Chinese) rather than Latin letters
+    (English mode); None when it has no input method that says."""
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd) if hwnd else None
+    if not ime:
+        return None
+    opened = _ime_ask(ime, IMC_GETOPENSTATUS)
+    mode = _ime_ask(ime, IMC_GETCONVERSIONMODE)
+    if opened is None or mode is None:
+        return None
+    return bool(opened) and bool(mode & 1)                    # IME_CMODE_NATIVE
+
+
+def set_ime_native(hwnd, native: bool) -> None:
+    ime = imm32.ImmGetDefaultIMEWnd(hwnd) if hwnd else None
+    if not ime:
+        return
+    mode = _ime_ask(ime, IMC_GETCONVERSIONMODE) or 0
+    if native:
+        _ime_ask(ime, IMC_SETOPENSTATUS, 1)
+    _ime_ask(ime, IMC_SETCONVERSIONMODE, (mode | 1) if native else (mode & ~1))
+
+
+def switch_keyboard(hwnd, hkl: int) -> None:
+    """Ask a window to type with another layout, as the language switcher does."""
+    if hkl >= 1 << 63:
+        hkl -= 1 << 64                                        # LPARAM is signed
+    user32.PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl)
 
 
 # ---------------------------------------------------------------- a framed window's look

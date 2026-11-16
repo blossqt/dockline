@@ -9,7 +9,8 @@ from pathlib import Path
 
 DEFAULT_WIDGETS = ['start', 'search', 'taskview', 'apps', 'media', 'volume', 'network', 'cpu', 'ram', 'weather', 'tray', 'clock']
 # widgets added to an existing dock once, when a version brings them (the person can remove them)
-NEW_WIDGETS = {'tray': 'clock', 'taskview': 'apps'}      # widget: put before this one
+NEW_WIDGETS = {'tray': 'clock', 'taskview': 'apps', 'language': 'clock'}      # widget: put before this one
+ONLY_WITH_TWO_KEYBOARDS = {'language'}      # offered only where Windows has more than one keyboard language
 
 DEFAULTS = {
     'look': 'glass',            # black, white, glass, midnight
@@ -22,6 +23,7 @@ DEFAULTS = {
     'startup': False,
     'widgets': DEFAULT_WIDGETS,
     'pinned': [],
+    'pins_imported': False,     # the Windows taskbar's pins were brought over once
     'app_order': [],            # the apps' order as arranged by dragging
     'offered': [],              # new widgets already added once
     'glass_opacity': 18,        # the Glass style's tint, in percent: lower is clearer
