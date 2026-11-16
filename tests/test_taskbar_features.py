@@ -170,6 +170,82 @@ class DockTests(Temp):
         self.assertFalse(tile.grab().isNull())
 
 
+class DisplayTests(unittest.TestCase):
+    """The main dock follows Windows' main display (stand-in displays and docks)."""
+
+    def setUp(self):
+        from dockline import docks
+
+        class Screen:
+            def __init__(self, name):
+                self._name = name
+
+            def name(self):
+                return self._name
+
+        class FakeDock:
+            made = []
+
+            def __init__(self, cfg, screen=None, main=True):
+                self.target_screen, self.main, self.multi, self.tiles, self.others = screen, main, False, [], []
+                self.alive = True
+                self.stopped = False
+                FakeDock.made.append(self)
+
+            def screen_alive(self):
+                return self.target_screen in docks_module.QGuiApplication.screens()
+
+            def move_to(self, screen):
+                self.target_screen = screen
+
+            def start(self): pass
+            def stop(self): self.stopped = True
+            def close(self): pass
+            def deleteLater(self): pass
+
+        class Gui:
+            primary = None
+            shown = []
+
+            @classmethod
+            def primaryScreen(cls):
+                return cls.primary
+
+            @classmethod
+            def screens(cls):
+                return list(cls.shown)
+
+        docks_module = docks
+        self.docks, self.Screen, self.Gui = docks, Screen, Gui
+        self.saved = docks.Dock, docks.QGuiApplication, win.taskbar_settings
+        docks.Dock, docks.QGuiApplication = FakeDock, Gui
+        win.taskbar_settings = lambda: (True, 0)
+
+    def tearDown(self):
+        self.docks.Dock, self.docks.QGuiApplication, win.taskbar_settings = self.saved
+
+    def test_main_monitor_off_and_back(self):
+        dell, typec = self.Screen('DISPLAY1'), self.Screen('DISPLAY2')
+        self.Gui.primary, self.Gui.shown = dell, [dell, typec]
+        group = self.docks.Docks(Config(None))
+        group.main.target_screen = dell
+        group.sync()
+        self.assertIs(group.main.target_screen, dell)
+        self.assertEqual(list(group.extra), ['DISPLAY2'])
+        second = group.extra['DISPLAY2']
+        # the main monitor is turned off: Windows makes the other one main
+        self.Gui.primary, self.Gui.shown = typec, [typec]
+        group.sync()
+        self.assertIs(group.main.target_screen, typec)          # the full dock, with its widgets, moved
+        self.assertEqual(group.extra, {})
+        self.assertTrue(second.stopped)
+        # and back on
+        self.Gui.primary, self.Gui.shown = dell, [dell, typec]
+        group.sync()
+        self.assertIs(group.main.target_screen, dell)
+        self.assertEqual(list(group.extra), ['DISPLAY2'])
+
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 

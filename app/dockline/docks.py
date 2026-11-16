@@ -30,18 +30,27 @@ class Docks(QObject):
         app = QGuiApplication.instance()
         app.screenAdded.connect(lambda _: QTimer.singleShot(600, self.sync))
         app.screenRemoved.connect(lambda _: QTimer.singleShot(0, self.sync))
+        app.primaryScreenChanged.connect(lambda _: QTimer.singleShot(0, self.sync))
 
     def sync(self) -> None:
+        """The main dock on Windows' main display - whichever that is now: with the main monitor turned
+        off, Windows makes another one main, and the full dock goes there - and a second dock on each
+        other display."""
         enabled, _ = win.taskbar_settings()
-        primary = self.main.target_screen
+        primary = QGuiApplication.primaryScreen()
+        if primary is None:
+            return
         screens = {s.name(): s for s in QGuiApplication.screens()}
         want = {name: s for name, s in screens.items() if s is not primary} if enabled else {}
-        for name in list(self.extra):
-            if name not in want or self.extra[name].target_screen is not want[name]:
+        for name in list(self.extra):                # first the second docks that no longer belong, so
+            if name not in want or self.extra[name].target_screen is not want[name] \
+                    or not self.extra[name].screen_alive():                 # the main one finds the room free
                 dock = self.extra.pop(name)
                 dock.stop()
                 dock.close()
                 dock.deleteLater()
+        if self.main.target_screen is not primary or not self.main.screen_alive():
+            self.main.move_to(primary)
         for name, screen in want.items():
             if name not in self.extra:
                 dock = Dock(self.cfg, screen=screen, main=False)

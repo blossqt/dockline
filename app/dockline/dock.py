@@ -247,7 +247,7 @@ class Dock(QWidget):
             self.keeper.start()
             self.start_guard()
         win.user32.RegisterShellHookWindow(hwnd)     # the taskbar's notices: windows coming, going, flashing
-        self.target_screen.geometryChanged.connect(lambda _: self.place_soon.start())
+        self.target_screen.geometryChanged.connect(self.screen_changed)
         self.peek.start()
         if self.autohide():                          # shown for a moment at start, then tucked away
             self.away_since = time.monotonic() + 1.5
@@ -272,7 +272,7 @@ class Dock(QWidget):
             win.round_corners(int(self.winId()), False)   # the dock draws its own corners
 
     def place(self) -> None:
-        if self.testing or self.moving or (not self.isVisible() and not self.tucked):
+        if self.testing or self.moving or (not self.isVisible() and not self.tucked) or not self.screen_alive():
             return
         self._device = ''
         screen = self.target_screen
@@ -521,6 +521,8 @@ class Dock(QWidget):
     def watch_pointer(self) -> None:
         """Auto-hide: tucked away until the pointer reaches the screen's edge under it (never over a
         full-screen game), and away again half a second after the pointer leaves it."""
+        if not self.screen_alive():
+            return                                   # its display went: Docks moves it within moments
         if not self.autohide():
             self.keep_in_place()
             if self.tucked:
@@ -568,6 +570,49 @@ class Dock(QWidget):
             self.slide(False, lambda: self.tucked and self.hide())
 
     # ------------------------------------------------------------ displays
+
+    def screen_changed(self, *_) -> None:
+        self.place_soon.start()
+
+    def screen_alive(self) -> bool:
+        """The display it was given still exists (a monitor turned off is taken away by Qt)."""
+        try:
+            self.target_screen.geometry()
+            return True
+        except (RuntimeError, AttributeError):
+            return False
+
+    def move_to(self, screen) -> None:
+        """Go to another display: the main dock follows Windows' main display, so turning the main
+        monitor off brings the full dock to the one left, and back once the monitor returns."""
+        if screen is self.target_screen and self.screen_alive():
+            return
+        if self.screen_alive():
+            try:
+                self.target_screen.geometryChanged.disconnect(self.screen_changed)
+            except (RuntimeError, TypeError):
+                pass
+        if self.appbar is not None:
+            self.appbar.remove()
+        self.target_screen = screen
+        self._device = ''
+        self.band = QRect()
+        self.resting = QRect()
+        if self.testing:
+            return
+        screen.geometryChanged.connect(self.screen_changed)
+        self.full_screen = False
+        self.full_watch.stop()
+        self.tucked = False
+        self.away_since = time.monotonic() + 1.5 if self.autohide() else None
+        if not self.isVisible():
+            self.show()
+        self.place()
+        self.setGeometry(self.resting if not self.resting.isNull() else self.geometry())
+        self._device = ''
+        for tile in self.tiles:
+            if tile.ID == 'apps':
+                tile.refresh()
 
     @property
     def device(self) -> str:
