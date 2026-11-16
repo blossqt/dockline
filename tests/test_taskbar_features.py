@@ -143,6 +143,25 @@ class DockTests(Temp):
         mime.setUrls([QUrl.fromLocalFile(r'C:\a b\c.txt')])
         self.assertEqual(tile.dragged_files(mime), [r'C:\a b\c.txt'])
 
+    def test_app_menu_has_only_the_app(self):
+        from PySide6.QtWidgets import QMenu
+        source = some_shortcut()
+        program = shortcuts.read(str(source)).target
+        dock = self.make()
+        dock.cfg['pinned'] = [str(source)]
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, program)]
+        tile = self.apps(dock)
+        tile.refresh()
+        tile.resize(tile.sizeHint())
+        centre = tile.rects()[0].center().toPoint()
+        self.assertTrue(tile.owns_menu(centre))
+        menu = QMenu()
+        tile.menu(menu, centre)
+        words = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual(words, [source.stem, 'Run as administrator', 'Open file location', 'Unpin from dock',
+                                 'Close window', 'End task'])
+        self.assertFalse(tile.owns_menu(centre + type(centre)(tile.width() + 50, 0)))
+
     def test_language_tile_draws(self):
         dock = self.make()
         tile = next(t for t in dock.tiles if t.ID == 'language')

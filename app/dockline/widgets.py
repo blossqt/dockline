@@ -727,24 +727,42 @@ class AppsTile(Tile):
             layout.addWidget(row)
         self.open_card(content, 320)
 
+    def owns_menu(self, pos) -> bool:
+        """A right-click on an app gives that app's menu alone, as the taskbar does; elsewhere on the
+        strip, the dock's own menu shows."""
+        return self.index_at(pos) >= 0
+
     def menu(self, menu, pos):
         index = self.index_at(pos)
         if index < 0:
             return
         group = self.groups[index]
+        program = shortcuts.program_of(group.path) if group.path else ''
+        if not program and group.windows and group.windows[0].path.lower().endswith('.exe'):
+            program = group.windows[0].path
         if group.path:
+            name = os.path.splitext(os.path.basename(group.path))[0] or 'App'
+            launch = menu.addAction(name, lambda: _open(group.path))      # the taskbar's top line: start it
+            pixmap = self.icon_for(group)
+            if pixmap is not None:
+                from PySide6.QtGui import QIcon
+                launch.setIcon(QIcon(pixmap))
+            if program:
+                menu.addAction('Run as administrator', lambda: win.shell_open(program, verb='runas'))
+                menu.addAction('Open file location', lambda: win.shell_open(
+                    'explorer.exe', f'/select,{shortcuts.quote(program)}'))
+            menu.addSeparator()
             if group.pinned:
                 menu.addAction('Unpin from dock', lambda: self.pin(group.path, False))
             else:
                 menu.addAction('Pin to dock', lambda: self.pin(group.path, True))
-            menu.addAction('New window', lambda: _open(group.path))
         if group.windows:
+            menu.addSeparator()
             label = 'Close window' if len(group.windows) == 1 else 'Close all windows'
             menu.addAction(label, lambda: [win.close(w.hwnd) for w in group.windows])
             pids = {w.pid for w in group.windows if w.pid and not w.path.lower().endswith('\\explorer.exe')}
             if pids:
                 menu.addAction('End task', lambda: [win.end_process(pid) for pid in pids])
-        menu.addSeparator()
 
     def pin(self, path: str, on: bool):
         pinned = [p for p in self.dock.cfg['pinned'] if p.lower() != path.lower()]

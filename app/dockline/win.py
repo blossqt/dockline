@@ -543,9 +543,9 @@ shell32.ShellExecuteW.argtypes = [HWND, wintypes.LPCWSTR, wintypes.LPCWSTR, wint
 shell32.ShellExecuteW.restype = ctypes.c_ssize_t
 
 
-def shell_open(program: str, arguments: str = '', folder: str | None = None) -> bool:
-    """Start a program (or open a file) with arguments, as Explorer would."""
-    return shell32.ShellExecuteW(None, 'open', program, arguments or None, folder or None, 1) > 32
+def shell_open(program: str, arguments: str = '', folder: str | None = None, verb: str = 'open') -> bool:
+    """Start a program (or open a file) with arguments, as Explorer would ('runas': as administrator)."""
+    return shell32.ShellExecuteW(None, verb, program, arguments or None, folder or None, 1) > 32
 
 
 def end_process(pid: int) -> bool:

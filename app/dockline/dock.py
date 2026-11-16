@@ -770,6 +770,10 @@ class Dock(QWidget):
             hwnd = int(menu.winId())
             win.acrylic(hwnd, True, 0x01000000)
             win.round_corners(hwnd, True)
+        if tile is not None and getattr(tile, 'owns_menu', None) and tile.owns_menu(local):
+            tile.menu(menu, local)                       # an app's own menu, nothing of the dock's
+            menu.exec(where)
+            return
         if tile is not None:
             tile.menu(menu, local)
             menu.addAction(f'Remove {tile.NAME}', lambda: self.remove_widget(tile.ID))
