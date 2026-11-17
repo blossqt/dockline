@@ -1,10 +1,13 @@
 """Live window previews above an app, as the Windows taskbar shows them on hover (or on a click on
 an app with several windows): Windows itself (DWM) draws each window's live picture into the panel.
-Resting on one shows that window alone on the screen, the others faded, with Windows' own peek
-(the taskbar's); click it to switch to it, or its close button to close it.
+Resting on one shows that window on the screen, the rest dimmed, with the dock and the previews still
+over it, as the taskbar's peek does; click it to switch to it, or its close button to close it.
 
-Windows' own preview pop-up can't be used: it belongs to the taskbar, which Dockline hides. Its
-two parts are what this uses - DWM's live thumbnails, and DWM's live preview (the peek)."""
+Windows' own preview pop-up can't be used: it belongs to the taskbar, which Dockline hides. Nor can
+Windows' own peek (DwmpActivateLivePreview): it draws the peeked window over every other one - the
+dock and the previews included (seen on screen, 2026-11-17); only the taskbar itself is let through.
+So the peek is drawn here (PeekLayer): a layer over the screen, under the dock and the previews, with
+the screen dimmed and the window's live picture where the window is."""
 
 from __future__ import annotations
 
@@ -12,7 +15,7 @@ import ctypes
 from ctypes import wintypes
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from . import look as L
@@ -32,24 +35,130 @@ dwmapi.DwmUpdateThumbnailProperties.argtypes = [ctypes.c_void_p, ctypes.POINTER(
 dwmapi.DwmQueryThumbnailSourceSize.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.SIZE)]
 RECT_DESTINATION, OPACITY, VISIBLE, CLIENT_ONLY = 0x1, 0x4, 0x8, 0x10
 
-# The taskbar's peek: DwmpActivateLivePreview, exported by number only (113) - (on, the window to show,
-# the window kept on top of the fade, 1 = a window's peek, reserved)
-try:
-    _live_preview = dwmapi[113]
-    _live_preview.argtypes = [wintypes.UINT, wintypes.HWND, wintypes.HWND, wintypes.UINT, ctypes.c_void_p]
-    _live_preview.restype = ctypes.c_long
-except (AttributeError, OSError):              # pragma: no cover - a Windows without it
-    _live_preview = None
+
+class _Placement(ctypes.Structure):
+    _fields_ = [('length', wintypes.UINT), ('flags', wintypes.UINT), ('showCmd', wintypes.UINT),
+                ('ptMinPosition', wintypes.POINT), ('ptMaxPosition', wintypes.POINT),
+                ('rcNormalPosition', wintypes.RECT)]
 
 
-def peek(on: bool, hwnd: int = 0, keep: int = 0) -> None:
-    """Show one window alone on the screen (on), or end that."""
-    if _live_preview is None:
+win.user32.GetWindowPlacement.argtypes = [wintypes.HWND, ctypes.POINTER(_Placement)]
+win.user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, wintypes.UINT]
+HWND_TOPMOST = wintypes.HWND(-1)
+SWP_KEEP = 0x0001 | 0x0002 | 0x0010            # no size, no move, no activation
+
+
+def _shown_rect(hwnd: int) -> wintypes.RECT:
+    """Where a window is on screen, in physical pixels - where it would be, if minimised."""
+    rect = wintypes.RECT()
+    if win.user32.IsIconic(hwnd):
+        placement = _Placement()
+        placement.length = ctypes.sizeof(_Placement)
+        if win.user32.GetWindowPlacement(hwnd, ctypes.byref(placement)):
+            rect = placement.rcNormalPosition
+            if placement.flags & 0x2:                  # WPF_RESTORETOMAXIMIZED: its monitor's work area
+                info = win._MonitorInfo()
+                info.cbSize = ctypes.sizeof(info)
+                monitor = win.user32.MonitorFromWindow(hwnd, 2)
+                if monitor and win.user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                    rect = info.rcWork
+        return rect
+    win.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return rect
+
+
+class PeekLayer(QWidget):
+    """The peek: over the screen the window is on, the screen as it was dimmed and softened, and the
+    window's live picture (DWM) where the window is. Ordinary (not layered): DWM draws thumbnails only
+    into such windows. Takes no clicks and never the keyboard."""
+
+    DIM = 150                                       # the black laid over the rest, of 255
+
+    def __init__(self):
+        super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+                         | Qt.WindowDoesNotAcceptFocus | Qt.WindowTransparentForInput | Qt.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WA_ShowWithoutActivating)
+        self.backdrop: QPixmap | None = None
+        self.thumb = ctypes.c_void_p()
+        self.target = 0
+
+    def show_window(self, hwnd: int, keep: list) -> None:
+        """Peek at hwnd; keep (the dock, the previews; lowest first) stay over it."""
+        rect = _shown_rect(hwnd)
+        middle = QPoint((rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2)
+        screen = None
+        for candidate in QGuiApplication.screens():         # the screen holding the window's middle
+            g = candidate.geometry()
+            ratio = candidate.devicePixelRatio()
+            physical = QRect(round(g.x() * ratio), round(g.y() * ratio), round(g.width() * ratio),
+                             round(g.height() * ratio))
+            if physical.contains(middle):
+                screen = candidate
+        screen = screen or QGuiApplication.primaryScreen()
+        if not self.isVisible() or self.screen() is not screen:
+            shot = screen.grabWindow(0)                      # before the layer is on screen: never in it
+            image = shot.toImage()
+            size = image.size()
+            soft = image.scaled(max(1, size.width() // 6), max(1, size.height() // 6), Qt.IgnoreAspectRatio,
+                                Qt.SmoothTransformation)
+            self.backdrop = QPixmap.fromImage(soft.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+            self.setGeometry(screen.geometry())
+        self.drop_thumb()
+        self.target = hwnd
+        if not self.isVisible():
+            self.show()
+        own = wintypes.HWND(int(self.winId()))
+        thumb = ctypes.c_void_p()
+        if dwmapi.DwmRegisterThumbnail(own, wintypes.HWND(hwnd), ctypes.byref(thumb)) == 0:
+            corner = wintypes.RECT()
+            win.user32.GetWindowRect(own, ctypes.byref(corner))
+            props = _ThumbProps()
+            props.dwFlags = RECT_DESTINATION | OPACITY | VISIBLE | CLIENT_ONLY
+            props.rcDestination = wintypes.RECT(rect.left - corner.left, rect.top - corner.top,
+                                                rect.right - corner.left, rect.bottom - corner.top)
+            props.opacity = 255
+            props.fVisible = True
+            props.fSourceClientAreaOnly = False
+            dwmapi.DwmUpdateThumbnailProperties(thumb, ctypes.byref(props))
+            self.thumb = thumb
+        for kept in keep:                                    # the dock, then the previews, back on top
+            if kept:
+                win.user32.SetWindowPos(wintypes.HWND(kept), HWND_TOPMOST, 0, 0, 0, 0, SWP_KEEP)
+        self.update()
+
+    def drop_thumb(self) -> None:
+        if self.thumb:
+            dwmapi.DwmUnregisterThumbnail(self.thumb)
+        self.thumb = ctypes.c_void_p()
+
+    def end(self) -> None:
+        self.drop_thumb()
+        self.target = 0
+        self.backdrop = None
+        self.hide()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        if self.backdrop is not None:
+            painter.drawPixmap(QRectF(self.rect()), self.backdrop, QRectF(self.backdrop.rect()))
+        painter.fillRect(self.rect(), QColor(0, 0, 0, self.DIM))
+
+
+_layer = None
+
+
+def peek(on: bool, hwnd: int = 0, keep=()) -> None:
+    """Show one window on the screen with the rest dimmed and keep over it (on), or end that."""
+    global _layer
+    if not on:
+        if _layer is not None:
+            _layer.end()
         return
-    try:
-        _live_preview(1 if on else 0, wintypes.HWND(hwnd or None), wintypes.HWND(keep or None), 1, None)
-    except OSError:
-        pass
+    if _layer is None:
+        _layer = PeekLayer()
+    _layer.show_window(hwnd, list(keep or []))
+
 
 BOX_W, BOX_H, TITLE_H, PAD, GAP = 216, 150, 28, 10, 8
 MOST = 6
@@ -148,7 +257,17 @@ class Previews(QWidget):
     def start_peek(self) -> None:
         if 0 <= self.hover < len(self.windows) and self.isVisible():
             self.peeking = self.windows[self.hover].hwnd
-            peek(True, self.peeking, int(self.winId()))
+            peek(True, self.peeking, self.kept_over())
+
+    def kept_over(self) -> list:
+        """What stays over a peeked window, lowest first: every dock, the magnified icons, these previews."""
+        dock = self.strip.dock
+        found = [int(d.winId()) for d in [dock, *dock.others] if d.isVisible()]
+        layer = getattr(self.strip, '_magnifier', None)
+        if layer is not None and layer.isVisible():
+            found.append(int(layer.winId()))
+        found.append(int(self.winId()))
+        return found
 
     def end_peek(self) -> None:
         self.peek_soon.stop()
