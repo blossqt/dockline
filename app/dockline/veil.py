@@ -106,6 +106,19 @@ def any_panel() -> int:
     return found[0] if found else 0
 
 
+def bring_up_taskbar() -> None:
+    """An auto-hidden taskbar's tray is only there once the taskbar is brought forward. It is made the
+    active window - allowed, as the dock was just clicked - rather than sent Win+B: Windows drops keys
+    an ordinary program sends while a program running as administrator is in front (Task Manager,
+    as a rule), and the tray did not open then. Win+B only if that was refused."""
+    tray = win.user32.FindWindowW('Shell_TrayWnd', None)
+    if tray:
+        win.activate(tray)
+        if win.user32.GetForegroundWindow() == tray:
+            return
+    win.press(win.VK_LWIN, ord('B'))
+
+
 SWP_NOZORDER = 0x4
 PLACING = 0.35          # seconds the panel is held in place over the Tray button while Windows settles it
 
@@ -142,7 +155,7 @@ class Veil(QObject):
             clear_taskbars(True)
             self.dock.taskbar.hold(30.0)         # the dock's keeper leaves the taskbar alone meanwhile
             win.show_taskbars(True)
-            win.press(win.VK_LWIN, ord('B'))     # up it comes, invisible, with its tray in reach
+            bring_up_taskbar()                   # up it comes, invisible, with its tray in reach
         self.ticker.start(10)
 
     def target(self, panel: int) -> tuple[int, int] | None:

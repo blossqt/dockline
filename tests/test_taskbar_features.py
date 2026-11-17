@@ -441,6 +441,22 @@ class TrayButtonTests(unittest.TestCase):
         self.assertIsNone(uia._choose([(None, n, 'SystemTray.NormalButton') for n in listed]))
 
 
+class TrayOpeningTests(unittest.TestCase):
+    def test_taskbar_brought_up_without_keys(self):
+        """Keys an ordinary program sends are dropped while an administrator's window (Task Manager)
+        is in front: the taskbar is made the active window instead, Win+B only if that is refused."""
+        from unittest import mock
+        from dockline import veil
+        pressed, front = [], [0]
+        with mock.patch.object(win.user32, 'FindWindowW', lambda cls, title: 77),                 mock.patch.object(win, 'activate', lambda hwnd: front.__setitem__(0, hwnd)),                 mock.patch.object(win.user32, 'GetForegroundWindow', lambda: front[0]),                 mock.patch.object(win, 'press', lambda *keys: pressed.append(keys)):
+            veil.bring_up_taskbar()
+            self.assertEqual(pressed, [])
+            front[0] = 0                                                         # an administrator's window in front
+            with mock.patch.object(win, 'activate', lambda hwnd: None):        # refused
+                veil.bring_up_taskbar()
+            self.assertEqual(pressed, [(win.VK_LWIN, ord('B'))])
+
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 
