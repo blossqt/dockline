@@ -59,6 +59,31 @@ def menu_css(look: L.Look, fill=None) -> str:
     """
 
 
+class GlassMenu(QMenu):
+    """The dock's right-click menu. In the Glass style, the screen behind it blurred under its tint
+    (Windows' own blur comes out flat grey here: look.frosted_behind)."""
+
+    RADIUS = 10
+
+    def __init__(self, parent, glass: bool):
+        super().__init__(parent)
+        self.glass = glass
+        self.backdrop = None
+
+    def showEvent(self, event):
+        if self.glass:                                   # before it is on screen: never in its own picture
+            self.backdrop = L.frosted_behind(self.geometry())
+        super().showEvent(event)
+
+    def paintEvent(self, event):
+        if self.glass and self.backdrop is not None:
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            L.paint_backdrop(painter, QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.backdrop)
+            painter.end()
+        super().paintEvent(event)
+
+
 SECOND_WIDGETS = ['start', 'apps', 'clock']     # a dock on another display, as Windows' second taskbars
 
 
@@ -806,18 +831,17 @@ class Dock(QWidget):
     # ------------------------------------------------------------ menus and windows
 
     def context_menu(self, tile, where: QPoint, local: QPoint) -> None:
-        menu = QMenu(self)
+        glass = self.look.glass and not self.testing
+        menu = GlassMenu(self, glass)                    # the dock's glass, over the screen behind blurred
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         menu.setAttribute(Qt.WA_TranslucentBackground)
-        glass = self.look.glass and not self.testing
         menu.setStyleSheet(menu_css(self.look, self.panel_fill() if glass else None))
-        if glass:                                        # the dock's glass, Windows' blur behind it
-            hwnd = int(menu.winId())
-            win.acrylic(hwnd, True, 0x01000000)
-            win.round_corners(hwnd, True)
+        if glass:
+            win.round_corners(int(menu.winId()), False)  # its own corners, round its frosted pane
         if tile is not None and getattr(tile, 'owns_menu', None) and tile.owns_menu(local):
             tile.menu(menu, local)                       # an app's own menu, nothing of the dock's
             menu.exec(where)
+            menu.deleteLater()                           # one menu a right-click: not kept on the dock
             return
         if tile is not None:
             tile.menu(menu, local)
@@ -834,6 +858,7 @@ class Dock(QWidget):
         menu.addSeparator()
         menu.addAction('Quit Dockline', QApplication.instance().quit)
         menu.exec(where)
+        menu.deleteLater()
 
     def set_hide_taskbar(self, on: bool) -> None:
         self.cfg['hide_taskbar'] = on

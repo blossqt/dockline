@@ -292,17 +292,24 @@ class Ghost(QWidget):
                          Qt.WindowTransparentForInput | Qt.WindowDoesNotAcceptFocus | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_DeleteOnClose)
         self.picture = picture
         self.origin = origin
         self.toward = toward
         self.progress = 0.0
         self.setGeometry(where)
 
+    alive: list = []        # held from Python until Qt has deleted them (as closed cards: see card.py)
+
     def start(self) -> None:
+        import shiboken6
+        Ghost.alive = [ghost for ghost in Ghost.alive if shiboken6.isValid(ghost)] + [self]
         self.show()
-        # closed (and so deleted) only after the animation has finished with it
-        run(self, CLOSE_MS, self.step, lambda: QTimer.singleShot(0, self.close), QEasingCurve(QEasingCurve.OutCubic))
+        # hidden, then deleted by Qt's event loop, only after the animation has finished with it
+        run(self, CLOSE_MS, self.step, lambda: QTimer.singleShot(0, self.finish), QEasingCurve(QEasingCurve.OutCubic))
+
+    def finish(self) -> None:
+        self.hide()
+        self.deleteLater()
 
     def step(self, progress: float) -> None:
         self.progress = progress

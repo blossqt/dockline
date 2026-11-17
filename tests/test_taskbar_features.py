@@ -184,6 +184,25 @@ class DockTests(Temp):
         self.assertFalse(carousel.pages[1].buttons['next'].isEnabled())
         tile.card.close()
 
+    def test_closed_card_is_deleted_by_qt_alone(self):
+        import shiboken6
+        from dockline.card import Card
+        dock = self.make()
+        tile = next(t for t in dock.tiles if t.ID == 'clock')
+        tile.click(tile.rect().center())
+        card = tile.card
+        tile.card = None                                       # the tile lets go, as card_closed does
+        card.close()
+        self.assertIn(card, Card.closing)                     # still held: Python can't free it
+        self.assertTrue(shiboken6.isValid(card))
+        for _ in range(5):
+            APP.processEvents()
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.assertFalse(shiboken6.isValid(card))             # Qt deleted it, from its own loop
+        Card.release_closed()
+        self.assertNotIn(card, Card.closing)
+
     def test_language_tile_draws(self):
         dock = self.make()
         tile = next(t for t in dock.tiles if t.ID == 'language')

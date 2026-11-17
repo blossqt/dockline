@@ -138,6 +138,10 @@ def main(argv: list[str]) -> int:
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(L.app_icon())
     theme.install(app)                       # the suite's style, glass, light or dark, and frame rate
+    # Not every event of the app through Python: the suite's smooth-wheel filter sits on Settings'
+    # scroll area alone (settings_window). App-wide, it was being run as Qt told a closing card's
+    # widgets their window was no longer active - where all five of Dockline's crashes were.
+    app.removeEventFilter(theme._wheels())
     app.setFont(L.font(14))
 
     name = f'Dockline-{getpass.getuser()}'

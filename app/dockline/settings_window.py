@@ -87,6 +87,7 @@ class SettingsWindow(QWidget):
         outer.addWidget(self.pages, 1)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.viewport().installEventFilter(theme._wheels())     # the suite's smooth wheel, here only
         self.pages.addWidget(scroll)
         from .picker import Picker
         self.picker = Picker(self.dock, embedded=True)

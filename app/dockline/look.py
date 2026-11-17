@@ -250,6 +250,43 @@ def paint_clear_glass(painter: QPainter, rect: QRectF, radius: float, fill: QCol
     painter.drawPath(inner)
 
 
+def frosted_behind(where) -> QPixmap | None:
+    """The screen behind a pop-up about to show (global rect), blurred: what the Glass style's cards
+    and menus are drawn over. Windows' own blur can't be used for them on this PC's Windows: the
+    acrylic accent comes out flat dark grey, and the system backdrop flat light grey for a window
+    that is not the active one. Taken before the pop-up is on screen, so it is never in it."""
+    from PySide6.QtGui import QGuiApplication
+    screen = QGuiApplication.screenAt(where.center()) or QGuiApplication.primaryScreen()
+    if screen is None or where.width() <= 0 or where.height() <= 0:
+        return None
+    area = screen.geometry()
+    shot = screen.grabWindow(0, where.x() - area.x(), where.y() - area.y(), where.width(), where.height())
+    if shot.isNull():
+        return None
+    image = shot.toImage()
+    size = image.size()
+    small = image.scaled(max(1, size.width() // 4), max(1, size.height() // 4), Qt.IgnoreAspectRatio,
+                         Qt.SmoothTransformation)
+    small = small.scaled(max(1, size.width() // 14), max(1, size.height() // 14), Qt.IgnoreAspectRatio,
+                         Qt.SmoothTransformation)
+    blurred = QPixmap.fromImage(small.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
+    blurred.setDevicePixelRatio(shot.devicePixelRatio())
+    return blurred
+
+
+def paint_backdrop(painter: QPainter, rect: QRectF, radius: float, backdrop) -> None:
+    """A frosted backdrop (frosted_behind) inside a pane's rounded shape."""
+    if backdrop is None or backdrop.isNull():
+        return
+    path = QPainterPath()
+    path.addRoundedRect(rect, radius, radius)
+    painter.save()
+    painter.setClipPath(path)
+    painter.setRenderHint(QPainter.SmoothPixmapTransform)
+    painter.drawPixmap(rect, backdrop, QRectF(backdrop.rect()))
+    painter.restore()
+
+
 def card_css(look: Look) -> str:
     fg = look.text
     PINK, ON_PINK = chip(look).name(), on_chip(look).name()
