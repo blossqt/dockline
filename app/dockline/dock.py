@@ -507,6 +507,15 @@ class Dock(QWidget):
     def autohide(self) -> bool:
         return bool(self.cfg.get('autohide', True)) and not self.testing
 
+    def tray_open(self) -> bool:
+        """Windows' hidden-icons panel (the Tray widget's) is open: the dock stays while the pointer is
+        in it - or anywhere, until it closes on a click elsewhere. Looked for only once the pointer has
+        left the dock, so not every 60 ms while it rests on it."""
+        if self.testing or not self.main:
+            return False
+        from .veil import panel_window
+        return bool(panel_window())
+
     def busy(self) -> bool:
         """Something of the dock's is open or held: it stays out."""
         if self.moving or self.editing or self.sliding or self.dropping or QApplication.activePopupWidget() is not None:
@@ -583,7 +592,7 @@ class Dock(QWidget):
             zone.setTop(g.top())
         else:
             zone.setBottom(g.bottom())
-        if zone.contains(pos):
+        if zone.contains(pos) or self.tray_open():
             if self.away_since is not None and self.away_since <= now:
                 self.away_since = None
             return

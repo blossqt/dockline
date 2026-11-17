@@ -234,6 +234,33 @@ class DockTests(Temp):
         layer.drop()
         dock.hide()
 
+    def test_open_tray_keeps_the_dock(self):
+        """Auto-hide: the pointer away from the dock - in Windows' hidden-icons panel - and the dock
+        stays while that panel is open; it goes as before once the panel has closed."""
+        import time as clock
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        from dockline import dock as dock_module, veil
+        dock = self.make()
+        dock.show()
+        far = QPoint(dock.x() + dock.width() // 2, dock.y() - 400)          # well above it: in the tray panel
+        tray = [4242]
+        with mock.patch.object(dock_module.QCursor, 'pos', staticmethod(lambda: far)),                 mock.patch.object(veil, 'panel_window', lambda: tray[0]),                 mock.patch.object(dock, 'autohide', lambda: True),                 mock.patch.object(dock, 'keep_in_place', lambda: None),                 mock.patch.object(dock, 'slide', lambda coming, then=None: setattr(dock, 'slid', coming)):
+            dock.testing = False                                   # tray_open looks only in a real dock
+            try:
+                for _ in range(3):
+                    dock.watch_pointer()
+                    dock.away_since = clock.monotonic() - 1 if dock.away_since else None
+                self.assertFalse(dock.tucked)
+                tray[0] = 0                                        # a click elsewhere closed the panel
+                dock.watch_pointer()
+                dock.away_since = clock.monotonic() - 1
+                dock.watch_pointer()
+                self.assertTrue(dock.tucked)
+            finally:
+                dock.testing = True
+        dock.hide()
+
     def test_language_tile_draws(self):
         dock = self.make()
         tile = next(t for t in dock.tiles if t.ID == 'language')
