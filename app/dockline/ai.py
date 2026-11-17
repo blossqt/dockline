@@ -54,6 +54,8 @@ CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 GEMINI_LOAD_URL = 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist'
 GEMINI_QUOTA_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota'
+ANTIGRAVITY_LOAD_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist'
+ANTIGRAVITY_QUOTA_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota'
 
 POLL_EVERY = 300        # seconds between background network refreshes
 WATCH_EVERY = 15        # seconds between local credential/session mtime checks
@@ -466,8 +468,8 @@ def latest_codex_session_limits(sessions_dir: Path) -> tuple[list[dict], str, fl
     return [], '', None
 
 
-def parse_gemini_quota(data: dict) -> list[dict]:
-    """Parse Cloud Code / Gemini CLI retrieveUserQuota buckets into Pro and Flash windows."""
+def parse_gemini_quota(data: dict, antigravity: bool = False) -> list[dict]:
+    """Parse Cloud Code / Gemini CLI / Antigravity retrieveUserQuota buckets into quota windows."""
     if not isinstance(data, dict):
         return []
     buckets = data.get('buckets')
@@ -506,7 +508,7 @@ def parse_gemini_quota(data: dict) -> list[dict]:
             ),
         )
 
-    pro = [b for b in pool if 'pro' in b['low'] or 'carbon' in b['low']]
+    pro = [b for b in pool if 'pro' in b['low'] or 'carbon' in b['low'] or 'hydrogen' in b['low']]
     flash = [b for b in pool if 'flash' in b['low'] or 'argon' in b['low']]
     windows = []
     if pro:
@@ -515,6 +517,12 @@ def parse_gemini_quota(data: dict) -> list[dict]:
     if flash:
         worst = pick_worst(flash)
         windows.append({'key': 'flash', 'label': 'Flash', 'used': worst['used'], 'resets_at': worst['resets_at']})
+    if antigravity:
+        agy_claude = [b for b in parsed if b['low'].startswith('claude') and b['resets_at'] is not None]
+        if agy_claude:
+            worst_c = pick_worst(agy_claude)
+            windows.append({'key': 'agy_claude', 'label': 'Claude (AGY)', 'used': worst_c['used'],
+                            'resets_at': worst_c['resets_at']})
     if not windows:
         for index, bucket in enumerate(sorted(pool, key=lambda b: (b['rem'], b['resets_at'] is None))[:2]):
             label = bucket['model'].replace('gemini-', '').title()[:10] or f'Pool {index + 1}'
@@ -650,36 +658,29 @@ def fetch_chatgpt(home: Path | None = None, opener=_http_json) -> dict:
     return _empty_state(bool(token))
 
 
-def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) -> list[dict]:
-    agents = ('antigravity/1.0', 'GeminiCLI/0.1.0') if 'antigravity' in source else ('GeminiCLI/0.1.0', 'antigravity/1.0')
+def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) -> tuple[list[dict], str]:
+    is_agy = 'antigravity' in source.lower()
+    endpoints = (
+        ((ANTIGRAVITY_LOAD_URL, ANTIGRAVITY_QUOTA_URL, 'antigravity/1.0', 'ANTIGRAVITY', 'Antigravity'),
+         (GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'antigravity/1.0', 'IDE_UNSPECIFIED', 'Antigravity'))
+        if is_agy else
+        ((GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'GeminiCLI/0.1.0', 'IDE_UNSPECIFIED', ''),
+         (GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'antigravity/1.0', 'IDE_UNSPECIFIED', ''))
+    )
     last_http: _HttpStatus | None = None
 
-    for ua in agents:
+    for load_url, quota_url, ua, ide_type, plan_label in endpoints:
         headers = {
             'Authorization': f'Bearer {token}',
             'User-Agent': ua,
         }
-        # Fast path for consumer / Antigravity tokens: retrieveUserQuota({}) answers directly
-        if ua.startswith('antigravity'):
-            try:
-                payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers, body={})
-                windows = parse_gemini_quota(payload)
-                if windows:
-                    return windows
-            except _RateLimited:
-                raise
-            except _HttpStatus as err:
-                last_http = err
-                if err.code == 401:
-                    raise
-
         project = None
         try:
             assist = opener(
-                GEMINI_LOAD_URL,
+                load_url,
                 method='POST',
                 headers=headers,
-                body={'metadata': {'ideType': 'IDE_UNSPECIFIED', 'platform': 'PLATFORM_UNSPECIFIED',
+                body={'metadata': {'ideType': ide_type, 'platform': 'PLATFORM_UNSPECIFIED',
                                    'pluginType': 'GEMINI'}},
             )
             if isinstance(assist, dict):
@@ -697,22 +698,22 @@ def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) ->
         except Exception:
             pass
 
-        try:
-            payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers,
-                             body={'project': project} if project else {})
-            windows = parse_gemini_quota(payload)
-            if windows:
-                return windows
-        except _RateLimited:
-            raise
-        except _HttpStatus as err:
-            last_http = err
-            if err.code == 401:
+        for body in ([{'project': project}, {}] if project else [{}]):
+            try:
+                payload = opener(quota_url, method='POST', headers=headers, body=body)
+                windows = parse_gemini_quota(payload, antigravity=is_agy)
+                if windows:
+                    return windows, plan_label
+            except _RateLimited:
                 raise
+            except _HttpStatus as err:
+                last_http = err
+                if err.code == 401:
+                    raise
 
     if last_http is not None:
         raise last_http
-    return []
+    return [], ''
 
 
 def fetch_gemini(home: Path | None = None, opener=_http_json, cred_reader=None) -> dict:
@@ -752,12 +753,12 @@ def fetch_gemini(home: Path | None = None, opener=_http_json, cred_reader=None) 
                         token = tok2
                         break
         try:
-            windows = _query_gemini_with_token(token, source=source, opener=opener)
+            windows, plan_label = _query_gemini_with_token(token, source=source, opener=opener)
             if windows:
                 return {
                     'connected': True,
                     'signed_in': True,
-                    'plan': '',
+                    'plan': plan_label,
                     'windows': windows,
                     'updated_at': time.time(),
                     'error': '',
@@ -773,12 +774,12 @@ def fetch_gemini(home: Path | None = None, opener=_http_json, cred_reader=None) 
                     for t2, tok2, _exp2, _m2 in read_windows_gemini_credentials():
                         if t2 == source and tok2:
                             try:
-                                windows = _query_gemini_with_token(tok2, source=source, opener=opener)
+                                windows, plan_label = _query_gemini_with_token(tok2, source=source, opener=opener)
                                 if windows:
                                     return {
                                         'connected': True,
                                         'signed_in': True,
-                                        'plan': '',
+                                        'plan': plan_label,
                                         'windows': windows,
                                         'updated_at': time.time(),
                                         'error': '',

@@ -1074,7 +1074,7 @@ class ScreenshotTile(Tile):
 class ProcessorTile(Tile):
     ID, NAME, GROUP = 'cpu', 'CPU', 'System'
     ABOUT = 'Processor load as a ring. A click opens Task Manager.'
-    WIDTH = 1.75
+    WIDTH = 1.9
 
     def setup(self):
         self.reader = sysinfo.Processor()
@@ -2761,11 +2761,62 @@ class _AITile(Tile):
                 return ai.sample_snapshot()
         return live
 
+    def _tile_style(self) -> str:
+        val = self.dock.cfg.get('ai_tile_style', 'rings')
+        return val if val in ('rings', 'gauges', 'bars') else 'rings'
+
+    def default_units(self) -> float:
+        style = self._tile_style()
+        if style == 'bars':
+            return self.WIDTH + 0.75
+        if style == 'gauges':
+            return self.WIDTH + 0.35
+        return self.WIDTH
+
+    def current_units(self) -> float:
+        if self.resizable():
+            saved = (self.dock.cfg.get('widget_widths') or {}).get(self.ID)
+            if isinstance(saved, (int, float)):
+                return max(self.min_units(), min(self.MAX_WIDTH, float(saved)))
+        return self.default_units()
+
+    def reset_width(self) -> None:
+        widths = dict(self.dock.cfg.get('widget_widths') or {})
+        if self.ID in widths:
+            widths.pop(self.ID, None)
+            self.dock.cfg['widget_widths'] = widths
+            self.dock.cfg.save()
+        self.setFixedWidth(round(self.dock.tile_height * self.default_units()))
+        self.update()
+        self.dock.fit_now()
+
     def _paint_rows(self, painter: QPainter, area: QRectF, look: L.Look,
                     rows: list[tuple[str | None, str, dict]]) -> None:
-        """Draw two compact limit rows, adapting cleanly as the widget is widened or narrowed."""
-        px = {'S': 10, 'M': 11, 'L': 12}.get(self.dock.cfg['size'], 11)
+        """Draw two compact limit rows using circular rings (default), side-by-side gauges, or bars."""
+        style = self._tile_style()
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        if style == 'gauges' and len(rows) >= 2:
+            cell_w = area.width() / 2.0
+            ring_s = min(area.height() * 0.76, cell_w * 0.42)
+            big, small = self.sizes()
+            for idx, (provider, label, window) in enumerate(rows[:2]):
+                cx = area.x() + idx * cell_w + (4 if idx else 0)
+                pct, share, left = ai.shown_value(window, show_used=show_used)
+                ry = area.center().y() - ring_s / 2.0
+                L.ring(painter, QRectF(cx, ry, ring_s, ring_s), share,
+                       ai.health_color(left, look.dark), look.c(look.track), max(2.6, ring_s * 0.11))
+                if provider:
+                    mark_s = ring_s * 0.56
+                    ai.paint_provider_mark(painter, QRectF(cx + (ring_s - mark_s) / 2.0,
+                                                           ry + (ring_s - mark_s) / 2.0, mark_s, mark_s),
+                                           provider, look.dark)
+                tx = cx + ring_s + 5
+                tw = max(18.0, (area.x() + (idx + 1) * cell_w) - tx - 2)
+                sub = ai.format_reset(window.get('resets_at')) or label
+                self.lines(painter, QRectF(tx, area.y(), tw, area.height()), f'{pct}%', sub)
+            return
+
+        px = {'S': 10, 'M': 11, 'L': 12}.get(self.dock.cfg['size'], 11)
         row_h = px * 1.24
         gap_y = max(2.0, area.height() * 0.08)
         total_h = 2 * row_h + gap_y
@@ -2774,7 +2825,8 @@ class _AITile(Tile):
         icon_s = round(px * 1.15) if has_icons else 0
         label_w = round(px * (4.4 if has_icons else 4.0))
         pct_w = round(px * 2.8)
-        reset_w = round(px * 3.9)
+        reset_w = round(px * 4.1)
+        ring_d = round(px * 1.18)
 
         for idx, (provider, label, window) in enumerate(rows[:2]):
             y = top_y + idx * (row_h + gap_y)
@@ -2788,32 +2840,46 @@ class _AITile(Tile):
             L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), f'{pct}%', look.c(look.text), px, 600,
                    Qt.AlignRight | Qt.AlignVCenter)
             avail_mid = (right - pct_w - 3) - x
-            # Compact fallback if narrowed: hide the bar first, then the reset timer if very narrow
             show_reset = avail_mid >= label_w + reset_w + 4
             reset_right = right - pct_w - 3
             if show_reset:
                 reset = ai.format_reset(window.get('resets_at'))
                 L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset, look.c(look.sub), px, 400,
                        Qt.AlignRight | Qt.AlignVCenter)
-                bar_right = reset_right - reset_w - 5
+                ind_right = reset_right - reset_w - 4
             else:
-                bar_right = reset_right
-            max_label = max(24.0, bar_right - x)
+                ind_right = reset_right
+            max_label = max(24.0, ind_right - x)
             L.text(painter, QRectF(x, y, min(label_w, max_label), row_h), label, look.c(look.text), px, 600,
                    Qt.AlignLeft | Qt.AlignVCenter)
-            bar_left = x + label_w + 4
-            if show_reset and bar_right - bar_left >= 12:
-                bar_h = max(3.5, round(px * 0.36))
-                L.bar(painter, QRectF(bar_left, y + (row_h - bar_h) / 2, bar_right - bar_left, bar_h),
-                      share, ai.health_color(left, look.dark), look.c(look.track))
+            ind_left = x + label_w + 4
+            if style == 'rings':
+                if ind_right - ind_left >= ring_d:
+                    rx = ind_left + (ind_right - ind_left - ring_d) * 0.35
+                    L.ring(painter, QRectF(rx, y + (row_h - ring_d) / 2, ring_d, ring_d), share,
+                           ai.health_color(left, look.dark), look.c(look.track), max(2.2, ring_d * 0.19))
+            else:
+                if show_reset and ind_right - ind_left >= 12:
+                    bar_h = max(3.5, round(px * 0.36))
+                    L.bar(painter, QRectF(ind_left, y + (row_h - bar_h) / 2, ind_right - ind_left, bar_h),
+                          share, ai.health_color(left, look.dark), look.c(look.track))
 
     def _paint_single_window(self, painter: QPainter, area: QRectF, look: L.Look,
                              label: str, window: dict) -> None:
-        """Draw a single limit window with bold percentage, reset time and full-width bar."""
-        big, small = self.sizes()
+        """Draw a single limit window with a circular ring (default) or horizontal bar."""
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         pct, share, left = ai.shown_value(window, show_used=show_used)
         reset = ai.format_reset(window.get('resets_at'))
+        if self._tile_style() != 'bars':
+            ring_s = min(area.height() * 0.68, area.width() * 0.32)
+            ry = area.center().y() - ring_s / 2.0
+            L.ring(painter, QRectF(area.x(), ry, ring_s, ring_s), share,
+                   ai.health_color(left, look.dark), look.c(look.track), max(2.6, ring_s * 0.12))
+            self.lines(painter, QRectF(area.x() + ring_s + 6, area.y(),
+                                       max(20.0, area.width() - ring_s - 6), area.height()),
+                       f'{pct}%', reset or label)
+            return
+        big, small = self.sizes()
         top_h = small * 1.2
         top_y = area.center().y() - (top_h + 9) / 2
         L.text(painter, QRectF(area.x(), top_y, area.width() * 0.58, top_h), f'{label} · {pct}%',
@@ -2966,6 +3032,31 @@ class _AITile(Tile):
         mode_row.addStretch(1)
         drawer_lay.addLayout(mode_row)
 
+        style_row = QHBoxLayout()
+        style_row.setSpacing(6)
+        style_row.addWidget(_label('Widget', 'sub'))
+        style_group = QButtonGroup(drawer)
+        style_group.setExclusive(True)
+        cur_style = self._tile_style()
+
+        def set_style(kind: str):
+            self.dock.cfg['ai_tile_style'] = kind
+            for t in self.dock.tiles:
+                if isinstance(t, _AITile) and t.ID not in (self.dock.cfg.get('widget_widths') or {}):
+                    t.setFixedWidth(round(self.dock.tile_height * t.default_units()))
+            self.dock.changed('ai')
+            self.dock.fit_now()
+            if self.card is not None:
+                self.card.refit()
+
+        for kind, word in (('rings', 'Rings'), ('gauges', 'Gauges'), ('bars', 'Bars')):
+            btn = _button(word, lambda _=False, k=kind: set_style(k), checkable=True)
+            btn.setChecked(cur_style == kind)
+            style_group.addButton(btn)
+            style_row.addWidget(btn)
+        style_row.addStretch(1)
+        drawer_lay.addLayout(style_row)
+
         if multi_service:
             # Show/hide AI services completely from both the card and the bar tile
             svc_row = QHBoxLayout()
@@ -3083,7 +3174,7 @@ class AILimitsTile(_AITile):
     ID, NAME = 'ai_limits', 'AI Limits'
     ABOUT = 'Two of your AI plans on one tile — Claude, ChatGPT or Gemini — showing how much is left and ' \
             'when each timer resets.'
-    WIDTH = 5.4
+    WIDTH = 5.15
 
     def chosen_rows(self, snap: dict[str, dict]) -> list[tuple[str | None, str, dict]]:
         enabled = self.enabled_providers()
@@ -3133,7 +3224,7 @@ class AILimitsTile(_AITile):
 
 
 class _SingleProviderAITile(_AITile):
-    WIDTH = 5.1
+    WIDTH = 4.85
 
     def paint(self, painter, rect, look):
         snap = self.snapshot()

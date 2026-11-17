@@ -786,5 +786,59 @@ class AIUsageTests(Temp):
             motion.on = real_motion
 
 
+    def test_antigravity_quota_endpoint_and_ring_widget_styles(self):
+        from PySide6.QtWidgets import QPushButton
+        from dockline import ai
+        from dockline.dock import Dock
+
+        urls = []
+
+        def fake_agy_opener(url, method='GET', headers=None, body=None, timeout=8):
+            urls.append(url)
+            if 'loadCodeAssist' in url:
+                return {'cloudaicompanionProject': 'agy-proj-1'}
+            if 'daily-cloudcode-pa.googleapis.com' in url:
+                return {
+                    'buckets': [
+                        {'modelId': 'gemini-4-hydrogen-sonar', 'remainingFraction': 0.72, 'resetTime': '2027-01-15T12:00:00Z'},
+                        {'modelId': 'gemini-3-flash', 'remainingFraction': 0.72, 'resetTime': '2027-01-15T12:00:00Z'},
+                        {'modelId': 'claude-sonnet-4-6', 'remainingFraction': 0.90, 'resetTime': '2027-01-15T14:00:00Z'},
+                    ]
+                }
+            return {'buckets': []}
+
+        empty_home = self.folder / 'agy-home'
+        empty_home.mkdir()
+        state = ai.fetch_gemini(
+            home=empty_home,
+            opener=fake_agy_opener,
+            cred_reader=lambda: [('gemini:antigravity', 'agy-tok', None, 100.0)],
+        )
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['plan'], 'Antigravity')
+        self.assertTrue(any('daily-cloudcode-pa.googleapis.com' in u for u in urls))
+        self.assertEqual([(w['label'], w['used']) for w in state['windows']],
+                         [('Pro', 28.0), ('Flash', 28.0), ('Claude (AGY)', 10.0)])
+
+        cfg = Config(None)
+        cfg['widgets'] = ['ai_limits']
+        dock = Dock(cfg, testing=True)
+        tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+        self.assertEqual(tile._tile_style(), 'rings')
+        tile.grab()
+
+        tile.click(tile.rect().center())
+        card = tile.card
+        toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+        toggle.click()
+        for style_word, expected in (('Gauges', 'gauges'), ('Bars', 'bars'), ('Rings', 'rings')):
+            btn = next(b for b in card.findChildren(QPushButton) if b.text() == style_word)
+            btn.click()
+            self.assertEqual(cfg['ai_tile_style'], expected)
+            tile.grab()
+        card.close()
+        dock.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()
