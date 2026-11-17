@@ -428,6 +428,19 @@ class StyleTests(unittest.TestCase):
                     self.assertLessEqual(int(alpha), 255, (name, opacity))
 
 
+class TrayButtonTests(unittest.TestCase):
+    def test_hidden_icons_button_found_by_its_changing_name(self):
+        """Windows build 26300 names it 'Show Hidden Icons Hide'; it was 'Show Hidden Icons'."""
+        from dockline import uia
+        listed = ['Touch Keyboard', 'Show Desktop', 'Volume Headphones (Protocol Max): 20%',
+                  'Tray Input Indicator English (United States)']
+        for name in ('Show Hidden Icons Hide', 'Show Hidden Icons', 'show hidden icons',
+                     '显示隐藏的图标'):
+            buttons = [(None, n, 'SystemTray.NormalButton') for n in listed + [name]]
+            self.assertEqual(uia._choose(buttons)[1], name)
+        self.assertIsNone(uia._choose([(None, n, 'SystemTray.NormalButton') for n in listed]))
+
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 

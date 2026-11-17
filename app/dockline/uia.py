@@ -112,8 +112,16 @@ def hidden_icons_button_name() -> str | None:
 
 
 def _choose(buttons):
+    """The hidden-icons button. Windows has changed its name before: on build 26300 (2026-11-17) it is
+    'Show Hidden Icons Hide' - the name and then its state - so a name that starts with, or holds, one
+    of NAMES (or just 'hidden icons' / '隐藏的图标') is taken, never one only equal to it."""
     for button in buttons:
-        if button[1].strip().lower() in NAMES:
+        name = ' '.join(button[1].split()).lower()
+        if any(name == known or name.startswith(known + ' ') for known in NAMES):
+            return button
+    for button in buttons:
+        name = button[1].lower()
+        if 'hidden icons' in name or '隐藏的图标' in name:
             return button
     return None
 
