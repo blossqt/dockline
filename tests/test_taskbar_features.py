@@ -172,6 +172,8 @@ class DockTests(Temp):
         self.assertEqual(tile.width(), tile.height())              # a small button now
         tile.click(tile.rect().center())
         carousel = tile.carousel
+        self.assertFalse(carousel.isWindow())                     # never a blank window of its own, even for a moment
+        self.assertFalse(tile.empty.isWindow())
         self.assertEqual([p.session.app for p in carousel.pages], ['Music', 'Browser'])
         wheel = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120), Qt.NoButton,
                             Qt.NoModifier, Qt.NoScrollPhase, False)

@@ -1439,8 +1439,8 @@ class _MediaCarousel(QWidget):
 
     DOTS = 18
 
-    def __init__(self, tile, sessions):
-        super().__init__()
+    def __init__(self, tile, sessions, parent=None):
+        super().__init__(parent)                          # made inside the card: never a window of its own
         self.tile = tile
         self.look = tile.look
         self.pages: list[_MediaPage] = []
@@ -1565,6 +1565,7 @@ class MediaTile(Tile):
         self.source = media.media()
         self.source.changed.connect(self.sessions_changed)
         self.sessions = list(self.source.sessions)
+        self.animate()
 
     def retire(self):
         if not self.dock.testing:
@@ -1576,6 +1577,7 @@ class MediaTile(Tile):
     def sessions_changed(self, sessions):
         self.sessions = sessions
         self.update()
+        self.animate()
         if self.carousel is not None:
             try:
                 self.carousel.show_sessions(sessions)
@@ -1589,12 +1591,48 @@ class MediaTile(Tile):
     def playing(self) -> bool:
         return any(s.playing for s in self.sessions)
 
+    BARS = (0.0, 1.9, 0.8, 2.7)          # each bar's phase: they rise and fall out of step
+    FRAME_MS = 33                         # about 30 frames a second, only while something plays
+
+    def animate(self) -> None:
+        """Equaliser bars that move while something plays; the note while nothing does."""
+        if not hasattr(self, 'beat'):
+            self.beat = QTimer(self)
+            self.beat.setInterval(self.FRAME_MS)
+            self.beat.timeout.connect(self.update)
+        moving = self.playing() and motion.on() and not self.dock.testing
+        if moving and not self.beat.isActive():
+            self.beat.start()
+        elif not moving and self.beat.isActive():
+            self.beat.stop()
+
+    def hideEvent(self, event):
+        if hasattr(self, 'beat'):
+            self.beat.stop()                     # tucked away or full screen: no frames for nobody
+        super().hideEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.animate()
+
     def paint(self, painter, rect, look):
-        L.glyph(painter, rect, MUSIC, look.c(look.text), rect.height() * 0.36)
-        if self.playing():                                 # something plays: a dot under the note
+        if not self.playing():
+            L.glyph(painter, rect, MUSIC, look.c(look.text), rect.height() * 0.36)
+        else:
+            import math
+            now = time.perf_counter() if (self.dock.testing is False and motion.on()) else 0.6
+            side = rect.height() * 0.4
+            bar = side / 5.2
+            gap = (side - 4 * bar) / 3
+            left = rect.center().x() - side / 2
+            bottom = rect.center().y() + side / 2
             painter.setPen(Qt.NoPen)
             painter.setBrush(look.c(look.text))
-            painter.drawRoundedRect(QRectF(rect.center().x() - 5, rect.bottom() - 7, 10, 2.5), 1.25, 1.25)
+            for number, phase in enumerate(self.BARS):
+                level = 0.3 + 0.7 * (0.5 + 0.5 * math.sin(now * (5.2 + number * 0.9) + phase))
+                height = side * level
+                painter.drawRoundedRect(QRectF(left + number * (bar + gap), bottom - height, bar, height),
+                                        bar / 2, bar / 2)
         playing = next((s for s in self.sessions if s.playing), None)
         self.setToolTip(f'{playing.title} - {playing.app}' if playing and playing.title else 'Media')
 
@@ -1603,12 +1641,14 @@ class MediaTile(Tile):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
+        # placed in the card before either is shown or hidden: shown while still without a parent,
+        # the carousel came up for a moment as a blank window of its own in the middle of the screen
         self.empty = _label('No media playing.', 'sub')
-        self.carousel = _MediaCarousel(self, self.sessions)
+        layout.addWidget(self.empty)
+        self.carousel = _MediaCarousel(self, self.sessions, content)
+        layout.addWidget(self.carousel)
         self.empty.setVisible(not self.sessions)
         self.carousel.setVisible(bool(self.sessions))
-        layout.addWidget(self.empty)
-        layout.addWidget(self.carousel)
         if not self.dock.testing:
             self.source.quick(True)
         self.open_card(content, 340)
