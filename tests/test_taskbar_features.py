@@ -633,5 +633,38 @@ class AIUsageTests(Temp):
         dock.deleteLater()
 
 
+    def test_gemini_windows_credential_manager_and_403_fallback(self):
+        import json
+        from dockline import ai
+
+        utf8_blob = json.dumps({'token': {'access_token': 'cred-mgr-token', 'expiry': '2027-01-15T12:00:00-05:00'}}).encode('utf-8')
+        utf16_blob = json.dumps({'access_token': 'keytar-token', 'expiry_date': 1800000000000}).encode('utf-16-le')
+        self.assertEqual(ai._extract_gemini_token(ai._decode_cred_blob(utf8_blob))[0], 'cred-mgr-token')
+        self.assertEqual(ai._extract_gemini_token(ai._decode_cred_blob(utf16_blob))[0], 'keytar-token')
+
+        def fake_opener(url, method='GET', headers=None, body=None, timeout=8):
+            ua = (headers or {}).get('User-Agent', '')
+            if ua != 'antigravity/1.0':
+                raise ai._HttpStatus(403, 'license check')
+            return {
+                'buckets': [
+                    {'modelId': 'tab_flash_lite_preview', 'remainingFraction': 1.0},
+                    {'modelId': 'gemini-2.5-pro', 'remainingFraction': 0.85, 'resetTime': '2027-01-15T12:00:00Z'},
+                    {'modelId': 'gemini-3-flash', 'remainingFraction': 1.0, 'resetTime': '2027-01-15T12:00:00Z'},
+                ]
+            }
+
+        empty_home = self.folder / 'no-files-home'
+        empty_home.mkdir()
+        state = ai.fetch_gemini(
+            home=empty_home,
+            opener=fake_opener,
+            cred_reader=lambda: [('gemini-cli-oauth', 'keytar-token', None, 100.0)],
+        )
+        self.assertTrue(state['connected'])
+        self.assertEqual([(w['label'], w['used'], w['resets_at'] is not None) for w in state['windows']],
+                         [('Pro', 15.0, True), ('Flash', 0.0, True)])
+
+
 if __name__ == '__main__':
     unittest.main()

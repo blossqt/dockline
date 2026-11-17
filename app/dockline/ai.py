@@ -1,23 +1,28 @@
 """AI plan allowances (Claude, ChatGPT, Gemini), read locally and from each vendor's own usage endpoint.
 
 Reads the sign-ins already kept on this PC by Claude Code (~/.claude/.credentials.json), OpenAI Codex
-(~/.codex/auth.json and ~/.codex/sessions) and Gemini CLI (~/.gemini/oauth_creds.json). Read-only:
-credential files are never modified, and tokens are never stored in Dockline's settings or cache.
+(~/.codex/auth.json and ~/.codex/sessions) and Gemini CLI / Antigravity CLI (~/.gemini/oauth_creds.json
+and Windows Credential Manager). Read-only: credential stores are never written by Dockline, and tokens
+are never saved in Dockline's settings or cache.
 """
 
 from __future__ import annotations
 
+import ctypes
 import datetime as dt
 import json
 import math
 import os
+import shutil
+import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
+from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 
 from .config import folder
@@ -41,7 +46,7 @@ INFO = {
         'name': 'Gemini',
         'short': 'Gemini',
         'title': 'Gemini Usage',
-        'hint': 'Sign in with Gemini CLI (gemini) on this PC to show your Pro and Flash quotas.',
+        'hint': 'Sign in with Gemini CLI on this PC to show your Pro and Flash quotas.',
     },
 }
 
@@ -54,6 +59,14 @@ POLL_EVERY = 300        # seconds between background network refreshes
 WATCH_EVERY = 15        # seconds between local credential/session mtime checks
 RATE_LIMIT_WAIT = 600   # seconds to back off if a provider answers HTTP 429
 LOW_THRESHOLD = 15.0    # warn once per reset window when remaining allowance drops to or below 15%
+CREATE_NO_WINDOW = 0x08000000
+
+GEMINI_CRED_TARGETS = (
+    'gemini-cli-oauth',
+    'gemini-cli-oauth:main-account',
+    'gemini-cli-oauth/main-account',
+    'gemini:antigravity',
+)
 
 
 class _HttpStatus(Exception):
@@ -185,6 +198,127 @@ def gemini_credentials_path(home: Path | None = None) -> Path:
     if home is None and os.environ.get('GEMINI_CLI_HOME'):
         return Path(os.environ['GEMINI_CLI_HOME']) / '.gemini' / 'oauth_creds.json'
     return (home or Path.home()) / '.gemini' / 'oauth_creds.json'
+
+
+# ---------------------------------------------------------------- Windows Credential Manager (Gemini CLI)
+
+class _CREDENTIALW(ctypes.Structure):
+    _fields_ = [
+        ('Flags', wintypes.DWORD),
+        ('Type', wintypes.DWORD),
+        ('TargetName', wintypes.LPWSTR),
+        ('Comment', wintypes.LPWSTR),
+        ('LastWritten', wintypes.FILETIME),
+        ('CredentialBlobSize', wintypes.DWORD),
+        ('CredentialBlob', ctypes.POINTER(ctypes.c_ubyte)),
+        ('Persist', wintypes.DWORD),
+        ('AttributeCount', wintypes.DWORD),
+        ('Attributes', ctypes.c_void_p),
+        ('TargetAlias', wintypes.LPWSTR),
+        ('UserName', wintypes.LPWSTR),
+    ]
+
+
+def _extract_gemini_token(payload) -> tuple[str, float | None]:
+    """Pull (access_token, expiry_epoch) from any Gemini CLI or Antigravity CLI credential JSON shape."""
+    if not isinstance(payload, dict):
+        return '', None
+    for container in (payload, payload.get('token'), payload.get('credentials'), payload.get('oauth')):
+        if not isinstance(container, dict):
+            continue
+        tok = str(container.get('access_token') or container.get('accessToken') or '').strip()
+        if tok:
+            exp = parse_time(container.get('expiry_date') or container.get('expiry') or container.get('expires_at'))
+            return tok, exp
+    return '', None
+
+
+def _decode_cred_blob(raw: bytes) -> dict | None:
+    if not raw:
+        return None
+    for enc in ('utf-8', 'utf-16-le'):
+        try:
+            text = raw.decode(enc).strip('\x00').strip()
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return None
+
+
+def _filetime_seconds(ft: wintypes.FILETIME) -> float:
+    ticks = (int(ft.dwHighDateTime) << 32) | int(ft.dwLowDateTime)
+    return max(0.0, ticks / 10_000_000.0 - 11_644_473_600.0) if ticks else 0.0
+
+
+def read_windows_gemini_credentials() -> list[tuple[str, str, float | None, float]]:
+    """Read Gemini CLI / Antigravity OAuth tokens from Windows Credential Manager (read-only).
+
+    Returns a list of (target_name, access_token, expiry_epoch, written_mtime).
+    """
+    if os.name != 'nt':
+        return []
+    advapi32 = ctypes.windll.advapi32
+    advapi32.CredReadW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   ctypes.POINTER(ctypes.POINTER(_CREDENTIALW))]
+    advapi32.CredReadW.restype = wintypes.BOOL
+    advapi32.CredEnumerateW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+                                        ctypes.POINTER(ctypes.POINTER(ctypes.POINTER(_CREDENTIALW)))]
+    advapi32.CredEnumerateW.restype = wintypes.BOOL
+    advapi32.CredFree.argtypes = [ctypes.c_void_p]
+
+    found: list[tuple[str, str, float | None, float]] = []
+    seen_targets: set[str] = set()
+
+    def inspect(cred: _CREDENTIALW) -> None:
+        target = str(cred.TargetName or '')
+        if not target or target in seen_targets or cred.CredentialBlobSize <= 0:
+            return
+        seen_targets.add(target)
+        raw = bytes(cred.CredentialBlob[:cred.CredentialBlobSize])
+        parsed = _decode_cred_blob(raw)
+        if parsed is None:
+            return
+        token, expiry = _extract_gemini_token(parsed)
+        if token:
+            found.append((target, token, expiry, _filetime_seconds(cred.LastWritten)))
+
+    for name in GEMINI_CRED_TARGETS:
+        ptr = ctypes.POINTER(_CREDENTIALW)()
+        if advapi32.CredReadW(name, 1, 0, ctypes.byref(ptr)):
+            try:
+                inspect(ptr.contents)
+            finally:
+                advapi32.CredFree(ptr)
+
+    for pattern in ('gemini*', '*gemini-cli*'):
+        count = wintypes.DWORD(0)
+        arr = ctypes.POINTER(ctypes.POINTER(_CREDENTIALW))()
+        if advapi32.CredEnumerateW(pattern, 0, ctypes.byref(count), ctypes.byref(arr)):
+            try:
+                for i in range(count.value):
+                    inspect(arr[i].contents)
+            finally:
+                advapi32.CredFree(arr)
+
+    return found
+
+
+def _refresh_antigravity_cli_token() -> bool:
+    """Ask the local CLI to refresh its expired Windows Credential Manager token (no window, no AI tokens)."""
+    exe = shutil.which('agy')
+    if not exe:
+        candidate = Path(os.environ.get('LOCALAPPDATA', '')) / 'agy' / 'bin' / 'agy.exe'
+        if candidate.is_file():
+            exe = str(candidate)
+    if not exe:
+        return False
+    try:
+        res = subprocess.run([exe, 'models'], capture_output=True, timeout=8, creationflags=CREATE_NO_WINDOW)
+        return res.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _empty_state(signed_in: bool = False, error: str = '') -> dict:
@@ -349,23 +483,39 @@ def parse_gemini_quota(data: dict) -> list[dict]:
         model = str(item.get('modelId') or '').strip()
         parsed.append({
             'model': model,
+            'low': model.lower(),
             'used': round((1.0 - rem) * 100.0, 1),
             'rem': rem,
             'resets_at': parse_time(item.get('resetTime')),
         })
     if not parsed:
         return []
-    pro = [b for b in parsed if 'pro' in b['model'].lower()]
-    flash = [b for b in parsed if 'flash' in b['model'].lower()]
+
+    # Ignore internal IDE tab-autocomplete buckets (tab_*, chat_*) when real gemini-* buckets exist
+    gemini_only = [b for b in parsed if b['low'].startswith('gemini')]
+    pool = gemini_only or [b for b in parsed if not b['low'].startswith(('tab_', 'chat_'))] or parsed
+
+    def pick_worst(candidates: list[dict]) -> dict:
+        return min(
+            candidates,
+            key=lambda b: (
+                round(b['rem'], 4),
+                1 if b['resets_at'] is None else 0,
+                1 if ('lite' in b['low'] or 'image' in b['low']) else 0,
+            ),
+        )
+
+    pro = [b for b in pool if 'pro' in b['low'] or 'carbon' in b['low']]
+    flash = [b for b in pool if 'flash' in b['low'] or 'argon' in b['low']]
     windows = []
     if pro:
-        worst = min(pro, key=lambda b: b['rem'])
+        worst = pick_worst(pro)
         windows.append({'key': 'pro', 'label': 'Pro', 'used': worst['used'], 'resets_at': worst['resets_at']})
     if flash:
-        worst = min(flash, key=lambda b: b['rem'])
+        worst = pick_worst(flash)
         windows.append({'key': 'flash', 'label': 'Flash', 'used': worst['used'], 'resets_at': worst['resets_at']})
     if not windows:
-        for index, bucket in enumerate(sorted(parsed, key=lambda b: b['rem'])[:2]):
+        for index, bucket in enumerate(sorted(pool, key=lambda b: (b['rem'], b['resets_at'] is None))[:2]):
             label = bucket['model'].replace('gemini-', '').title()[:10] or f'Pool {index + 1}'
             windows.append({'key': f'pool_{index}', 'label': label, 'used': bucket['used'],
                             'resets_at': bucket['resets_at']})
@@ -499,25 +649,31 @@ def fetch_chatgpt(home: Path | None = None, opener=_http_json) -> dict:
     return _empty_state(bool(token))
 
 
-def fetch_gemini(home: Path | None = None, opener=_http_json) -> dict:
-    path = gemini_credentials_path(home)
-    if not path.is_file():
-        return _empty_state(False)
-    try:
-        raw = json.loads(path.read_text('utf-8'))
-    except (OSError, ValueError):
-        return _empty_state(False, 'Could not read Gemini CLI credentials.')
-    token = str(raw.get('access_token') or '').strip() if isinstance(raw, dict) else ''
-    if not token:
-        return _empty_state(False)
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'User-Agent': 'gemini-cli/0.1.0',
-    }
-    try:
-        payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers, body={})
-        windows = parse_gemini_quota(payload)
-        if not windows:
+def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) -> list[dict]:
+    agents = ('antigravity/1.0', 'GeminiCLI/0.1.0') if 'antigravity' in source else ('GeminiCLI/0.1.0', 'antigravity/1.0')
+    last_http: _HttpStatus | None = None
+
+    for ua in agents:
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'User-Agent': ua,
+        }
+        # Fast path for consumer / Antigravity tokens: retrieveUserQuota({}) answers directly
+        if ua.startswith('antigravity'):
+            try:
+                payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers, body={})
+                windows = parse_gemini_quota(payload)
+                if windows:
+                    return windows
+            except _RateLimited:
+                raise
+            except _HttpStatus as err:
+                last_http = err
+                if err.code == 401:
+                    raise
+
+        project = None
+        try:
             assist = opener(
                 GEMINI_LOAD_URL,
                 method='POST',
@@ -525,30 +681,117 @@ def fetch_gemini(home: Path | None = None, opener=_http_json) -> dict:
                 body={'metadata': {'ideType': 'IDE_UNSPECIFIED', 'platform': 'PLATFORM_UNSPECIFIED',
                                    'pluginType': 'GEMINI'}},
             )
-            project = assist.get('cloudaicompanionProject') if isinstance(assist, dict) else None
-            if isinstance(project, dict):
-                project = project.get('id')
-            if isinstance(project, str) and project.strip():
-                payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers, body={'project': project.strip()})
-                windows = parse_gemini_quota(payload)
-    except _RateLimited:
-        raise
-    except _HttpStatus as err:
-        if err.code in (401, 403):
-            return _empty_state(True, 'Gemini token expired — open Gemini CLI once to refresh your sign-in.')
-        return _empty_state(True, f'Gemini quota unavailable ({err}).')
-    except Exception:
-        return _empty_state(True, 'Could not reach Gemini right now.')
-    if not windows:
-        return _empty_state(True, 'No quota buckets reported by Gemini.')
-    return {
-        'connected': True,
-        'signed_in': True,
-        'plan': '',
-        'windows': windows,
-        'updated_at': time.time(),
-        'error': '',
-    }
+            if isinstance(assist, dict):
+                raw_proj = assist.get('cloudaicompanionProject')
+                if isinstance(raw_proj, dict):
+                    raw_proj = raw_proj.get('id')
+                if isinstance(raw_proj, str) and raw_proj.strip():
+                    project = raw_proj.strip()
+        except _RateLimited:
+            raise
+        except _HttpStatus as err:
+            last_http = err
+            if err.code == 401:
+                raise
+        except Exception:
+            pass
+
+        try:
+            payload = opener(GEMINI_QUOTA_URL, method='POST', headers=headers,
+                             body={'project': project} if project else {})
+            windows = parse_gemini_quota(payload)
+            if windows:
+                return windows
+        except _RateLimited:
+            raise
+        except _HttpStatus as err:
+            last_http = err
+            if err.code == 401:
+                raise
+
+    if last_http is not None:
+        raise last_http
+    return []
+
+
+def fetch_gemini(home: Path | None = None, opener=_http_json, cred_reader=None) -> dict:
+    """Read Gemini quota from ~/.gemini/oauth_creds.json or Windows Credential Manager."""
+    candidates: list[tuple[str, str, float | None]] = []
+
+    path = gemini_credentials_path(home)
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text('utf-8'))
+            tok, exp = _extract_gemini_token(raw)
+            if tok:
+                candidates.append(('file', tok, exp))
+        except (OSError, ValueError):
+            pass
+
+    reader = cred_reader if cred_reader is not None else (read_windows_gemini_credentials if home is None else None)
+    if reader is not None:
+        for target, tok, exp, _mtime in reader():
+            candidates.append((target, tok, exp))
+
+    if not candidates:
+        return _empty_state(False)
+
+    last_error = ''
+    refreshed_agy = False
+    now = time.time()
+
+    for source, token, expiry in candidates:
+        # Proactively refresh an expired Antigravity CLI token before making a doomed 401 request
+        if source == 'gemini:antigravity' and expiry is not None and expiry <= now + 30 and not refreshed_agy \
+                and cred_reader is None and home is None:
+            refreshed_agy = True
+            if _refresh_antigravity_cli_token():
+                for t2, tok2, _exp2, _m2 in read_windows_gemini_credentials():
+                    if t2 == source and tok2:
+                        token = tok2
+                        break
+        try:
+            windows = _query_gemini_with_token(token, source=source, opener=opener)
+            if windows:
+                return {
+                    'connected': True,
+                    'signed_in': True,
+                    'plan': '',
+                    'windows': windows,
+                    'updated_at': time.time(),
+                    'error': '',
+                }
+            last_error = 'No quota buckets reported by Gemini.'
+        except _RateLimited:
+            raise
+        except _HttpStatus as err:
+            if err.code == 401 and source == 'gemini:antigravity' and not refreshed_agy \
+                    and cred_reader is None and home is None:
+                refreshed_agy = True
+                if _refresh_antigravity_cli_token():
+                    for t2, tok2, _exp2, _m2 in read_windows_gemini_credentials():
+                        if t2 == source and tok2:
+                            try:
+                                windows = _query_gemini_with_token(tok2, source=source, opener=opener)
+                                if windows:
+                                    return {
+                                        'connected': True,
+                                        'signed_in': True,
+                                        'plan': '',
+                                        'windows': windows,
+                                        'updated_at': time.time(),
+                                        'error': '',
+                                    }
+                            except Exception:
+                                pass
+            if err.code == 401:
+                last_error = 'Gemini token expired — open Gemini CLI once to refresh your sign-in.'
+            else:
+                last_error = f'Gemini quota unavailable ({err}).'
+        except Exception:
+            last_error = 'Could not reach Gemini right now.'
+
+    return _empty_state(True, last_error or 'Could not read Gemini quota.')
 
 
 FETCHERS = {
@@ -680,6 +923,10 @@ class AIUsage(QObject):
                     found[key] = path.stat().st_mtime
             except OSError:
                 pass
+        if self.home is None:
+            for target, _tok, _exp, written in read_windows_gemini_credentials():
+                if written:
+                    found[f'cred:{target}'] = written
         sessions = codex_home_path(self.home) / 'sessions'
         try:
             if sessions.is_dir():
@@ -691,13 +938,13 @@ class AIUsage(QObject):
         return found
 
     def watch_files(self) -> None:
-        """Notice a fresh login or Codex turn promptly without polling endpoints every few seconds."""
+        """Notice a fresh login or token update promptly without polling endpoints every few seconds."""
         if self.testing or self._busy:
             return
         now_mtimes = self._current_mtimes()
         if now_mtimes != self._mtimes:
             self._mtimes = now_mtimes
-            if time.monotonic() - self._last_poll >= 20.0:
+            if time.monotonic() - self._last_poll >= 15.0:
                 self.fetch()
 
     def fetch(self, force: bool = False) -> None:
