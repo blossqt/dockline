@@ -353,6 +353,14 @@ class AppsTile(Tile):
     def magnifier_done(self):
         self.update()
 
+    def moveEvent(self, event):                      # the strip moved in the row (a widget came or went)
+        super().moveEvent(event)
+        self.dock.keep_magnifier()
+
+    def resizeEvent(self, event):                    # or grew for a new app
+        super().resizeEvent(event)
+        self.dock.keep_magnifier()
+
     def retire(self):
         layer = getattr(self, '_magnifier', None)
         if layer is not None:

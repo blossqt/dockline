@@ -175,9 +175,15 @@ class Magnifier(QWidget):
                      self.strip.height() + up + 4)
         if self.strip.dock.edge == 'top':
             area.moveTop(top_left.y() - 4)
-        self.setGeometry(area)
+        if area != self.geometry():
+            self.setGeometry(area)
 
     def step(self) -> None:
+        # Kept over the strip every frame: placed only as it first showed, it stayed where the dock
+        # was then - mid-slide up from hiding, or before the dock widened for a new app - and the
+        # grown icons ran past its top edge, cut off.
+        if self.isVisible():
+            self.place()
         now = time.perf_counter()
         frames = min(4.0, (now - self.last) * 60)
         self.last = now

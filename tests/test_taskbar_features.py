@@ -203,6 +203,37 @@ class DockTests(Temp):
         Card.release_closed()
         self.assertNotIn(card, Card.closing)
 
+    def test_magnified_apps_follow_the_dock(self):
+        """The magnifier's layer was placed once, as it showed: with the dock still sliding up, or
+        widening later, the grown icons ran past its top edge and were cut off."""
+        from dockline import motion
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe'),
+                                       win.Window(102, 'Two', 8, r'C:\b\two.exe')]
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        tile.refresh()
+        dock.layout().activate()
+        layer = motion.Magnifier(tile)
+        tile._magnifier = layer
+        layer.follow(0.5)
+        self.assertTrue(layer.isVisible())
+
+        def expected():
+            side, up = layer.margin()
+            corner = tile.mapToGlobal(tile.rect().topLeft())
+            return (corner.x() - side, corner.y() - up)
+
+        self.assertEqual((layer.x(), layer.y()), expected())
+        dock.move(dock.x() + 37, dock.y() - 23)                # the dock slides up and along
+        for _ in range(3):
+            APP.processEvents()
+        self.assertEqual((layer.x(), layer.y()), expected())
+        layer.step()                                            # and each frame keeps it there
+        self.assertEqual((layer.x(), layer.y()), expected())
+        layer.drop()
+        dock.hide()
+
     def test_language_tile_draws(self):
         dock = self.make()
         tile = next(t for t in dock.tiles if t.ID == 'language')

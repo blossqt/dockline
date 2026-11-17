@@ -1,3 +1,3 @@
 """Dockline: a dock with live widgets that takes the Windows taskbar's place."""
 
-__version__ = '0.3.3'
+__version__ = '0.3.4'

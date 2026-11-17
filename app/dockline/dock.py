@@ -693,6 +693,21 @@ class Dock(QWidget):
                 self.place_soon.start()
         return False, 0
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.keep_magnifier()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.keep_magnifier()
+
+    def keep_magnifier(self) -> None:
+        """The magnified apps' layer stays over the strip as the dock slides or grows."""
+        for tile in getattr(self, 'tiles', []):
+            layer = getattr(tile, '_magnifier', None)
+            if layer is not None and layer.isVisible():
+                QTimer.singleShot(0, layer.place)        # once the row has been laid out at the new size
+
     def paintEvent(self, _):
         painter = QPainter(self)
         painter.setCompositionMode(QPainter.CompositionMode_Clear)     # what was drawn before goes:
