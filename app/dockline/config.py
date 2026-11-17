@@ -29,7 +29,9 @@ DEFAULTS = {
     'glass_opacity': 18,        # the Glass style's tint, in percent: lower is clearer
     'ai_show_used': False,      # False: percent left; True: percent used
     'ai_warn_low': True,        # show the dock briefly when an active AI window drops to 15% left
+    'ai_enabled': ['claude', 'chatgpt', 'gemini'],  # which AI services appear in AI Limits
     'ai_pair': ['claude', 'chatgpt'],   # preferred two plans on the combined AI Limits tile
+    'widget_widths': {},        # custom widget widths in units of tile height, set by dragging handles
     'notes': '',
     'city': '',
     'latitude': None,

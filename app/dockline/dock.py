@@ -340,6 +340,25 @@ class Dock(QWidget):
     def fit_soon(self) -> None:
         self.fit_later.start()
 
+    def fit_now(self) -> None:
+        """Resize and re-centre the dock immediately while a widget handle is dragged."""
+        self.relayout()
+        if self.testing:
+            self.resize(self.row.sizeHint().width(), self.bar_height)
+            return
+        if self.band.isNull() or self.moving:
+            return
+        if self._fit is not None:
+            try:
+                self._fit.stop()
+            except RuntimeError:
+                pass
+            self._fit = None
+        target = self.compact(self.band)
+        self.resting = target
+        if self.isVisible() and not self.sliding:
+            self.setGeometry(target)
+
     def fit(self) -> None:
         """Grow or shrink to the widgets and apps it holds, on the curve, staying centred."""
         if self.testing:
@@ -534,7 +553,7 @@ class Dock(QWidget):
         if self.settings_window is not None and self.settings_window.isVisible():
             return True                              # Settings open: the dock stays out to be seen
         for tile in self.tiles:
-            if tile.card is not None or tile._dragging or getattr(tile, 'dragged', None) is not None:
+            if tile.card is not None or tile._dragging or getattr(tile, '_resizing', False)                     or getattr(tile, 'dragged', None) is not None:
                 return True
             if tile.ID == 'apps' and tile.previews_visible():
                 return True
@@ -880,6 +899,8 @@ class Dock(QWidget):
             return
         if tile is not None:
             tile.menu(menu, local)
+            if tile.resizable() and tile.ID in (self.cfg.get('widget_widths') or {}):
+                menu.addAction('Reset width', tile.reset_width)
             menu.addAction(f'Remove {tile.NAME}', lambda: self.remove_widget(tile.ID))
             menu.addSeparator()
         menu.addAction('Settings…', self.open_settings)
@@ -947,6 +968,7 @@ class Dock(QWidget):
         """Settings were taken from an export: everything they cover, applied now."""
         for what in ('look', 'edge', 'opacity', 'clock', 'ai', 'weather', 'autohide', 'taskbar', 'startup'):
             self.changed(what)
+        self.rebuild()
         for tile in self.tiles:
             if tile.ID == 'apps':
                 tile.order = list(self.cfg['app_order'])

@@ -68,7 +68,9 @@ class Tile(QWidget):
     NAME = ''
     GROUP = ''
     ABOUT = ''
-    WIDTH = 1.0          # in units of the tile height
+    WIDTH = 1.0          # default width in units of the tile height
+    MIN_WIDTH = 1.2      # narrowest a resizable widget can be dragged
+    MAX_WIDTH = 10.0     # widest a resizable widget can be dragged
     PLAIN = False        # no tile background (the apps strip)
     STRETCH = False      # takes the dock's spare width
 
@@ -83,6 +85,10 @@ class Tile(QWidget):
         self.card: Card | None = None
         self._press: QPoint | None = None
         self._dragging = False
+        self._resizing = False
+        self._over_handle = False
+        self._resize_from_x = 0
+        self._resize_from_w = 0
         self.setMouseTracking(True)
         self.setCursor(Qt.PointingHandCursor)
         self.setFixedHeight(dock.tile_height)
@@ -90,9 +96,32 @@ class Tile(QWidget):
             self.setMinimumWidth(dock.tile_height)
             self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         else:
-            self.setFixedWidth(round(dock.tile_height * self.WIDTH))
+            self.setFixedWidth(round(dock.tile_height * self.current_units()))
         self.setToolTip(self.NAME)
         self.setup()
+
+    def resizable(self) -> bool:
+        return not self.PLAIN and not self.STRETCH and self.WIDTH > 1.0
+
+    def min_units(self) -> float:
+        return min(self.WIDTH, self.MIN_WIDTH)
+
+    def current_units(self) -> float:
+        if self.resizable():
+            saved = (self.dock.cfg.get('widget_widths') or {}).get(self.ID)
+            if isinstance(saved, (int, float)):
+                return max(self.min_units(), min(self.MAX_WIDTH, float(saved)))
+        return self.WIDTH
+
+    def reset_width(self) -> None:
+        widths = dict(self.dock.cfg.get('widget_widths') or {})
+        if self.ID in widths:
+            widths.pop(self.ID, None)
+            self.dock.cfg['widget_widths'] = widths
+            self.dock.cfg.save()
+        self.setFixedWidth(round(self.dock.tile_height * self.WIDTH))
+        self.update()
+        self.dock.fit_now()
 
     # -- for widgets to fill in
     def setup(self): pass
@@ -175,7 +204,15 @@ class Tile(QWidget):
         self.update()
 
     def badge_rect(self) -> QRectF:
-        return QRectF(self.width() - 17, 2, 15, 15)
+        return QRectF(2, 2, 15, 15)
+
+    def handle_rect(self) -> QRectF:
+        h = self.height()
+        bar_h = max(14.0, h * 0.52)
+        return QRectF(self.width() - 6.0, (h - bar_h) / 2.0, 4.0, bar_h)
+
+    def handle_hit_rect(self) -> QRectF:
+        return QRectF(max(18.0, self.width() - 11.0), 0.0, 11.0, float(self.height()))
 
     # -- events
     def paintEvent(self, _):
@@ -192,7 +229,7 @@ class Tile(QWidget):
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(0, 0, 0, round(255 * motion.PRESS_DARK * self.pressed)))
             painter.drawRoundedRect(rect, 10, 10)
-        if self._dragging:
+        if self._dragging or self._resizing:
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(L.chip(look), 2))
             painter.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 10, 10)
@@ -204,6 +241,13 @@ class Tile(QWidget):
             painter.setPen(QPen(L.on_chip(look), 2, Qt.SolidLine, Qt.RoundCap))
             middle = badge.center().y()
             painter.drawLine(badge.left() + 4, middle, badge.right() - 4, middle)
+            if self.resizable():
+                grip = self.handle_rect()
+                grip_color = QColor(L.chip(look))
+                grip_color.setAlpha(240 if (self._over_handle or self._resizing) else 150)
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(grip_color)
+                painter.drawRoundedRect(grip, 2.0, 2.0)
 
     def enterEvent(self, _):
         self.hover = True
@@ -211,19 +255,57 @@ class Tile(QWidget):
 
     def leaveEvent(self, _):
         self.hover = False
+        if self._over_handle and not self._resizing:
+            self._over_handle = False
+            self.setCursor(Qt.PointingHandCursor)
         self.fade('lit', 0.0, motion.HOVER_MS)
         if self.pressed and self._press is None:
             self.fade('pressed', 0.0, motion.HOVER_MS)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            pos = event.position()
+            if self.dock.editing and self.resizable() and self.handle_hit_rect().contains(pos):
+                self._resizing = True
+                self._resize_from_x = event.globalPosition().toPoint().x()
+                self._resize_from_w = self.width()
+                self._press = None
+                self.update()
+                return
             self._press = event.globalPosition().toPoint()
             self._dragging = False
             self.fade('pressed', 1.0, 0)                  # at once, as the original's does
         elif event.button() == Qt.RightButton:
             self.dock.context_menu(self, event.globalPosition().toPoint(), event.position().toPoint())
 
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.dock.editing and self.resizable()                 and self.handle_hit_rect().contains(event.position()):
+            self._resizing = False
+            self._press = None
+            self.reset_width()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def mouseMoveEvent(self, event):
+        if self._resizing and event.buttons() & Qt.LeftButton:
+            dx = event.globalPosition().toPoint().x() - self._resize_from_x
+            lo = max(28, round(self.dock.tile_height * self.min_units()))
+            hi = round(self.dock.tile_height * self.MAX_WIDTH)
+            new_w = max(lo, min(hi, self._resize_from_w + dx))
+            if new_w != self.width():
+                self.setFixedWidth(new_w)
+                self.update()
+                self.dock.fit_now()
+            return
+        if self.dock.editing and self.resizable() and not (event.buttons() & Qt.LeftButton):
+            over = self.handle_hit_rect().contains(event.position())
+            if over != self._over_handle:
+                self._over_handle = over
+                self.setCursor(Qt.SizeHorCursor if over else Qt.PointingHandCursor)
+                self.update()
+        elif self._over_handle:
+            self._over_handle = False
+            self.setCursor(Qt.PointingHandCursor)
         if self._press is not None and event.buttons() & Qt.LeftButton:
             where = event.globalPosition().toPoint()
             if not self._dragging and (where - self._press).manhattanLength() > 8:
@@ -235,6 +317,16 @@ class Tile(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton:
+            return
+        if self._resizing:
+            self._resizing = False
+            widths = dict(self.dock.cfg.get('widget_widths') or {})
+            widths[self.ID] = round(self.width() / max(1, self.dock.tile_height), 3)
+            self.dock.cfg['widget_widths'] = widths
+            if not self.dock.testing:
+                self.dock.cfg.save()
+            self.dock.fit_now()
+            self.update()
             return
         self.fade('pressed', 0.0, motion.HOVER_MS)
         if self._dragging:
@@ -982,7 +1074,7 @@ class ScreenshotTile(Tile):
 class ProcessorTile(Tile):
     ID, NAME, GROUP = 'cpu', 'CPU', 'System'
     ABOUT = 'Processor load as a ring. A click opens Task Manager.'
-    WIDTH = 1.9
+    WIDTH = 1.75
 
     def setup(self):
         self.reader = sysinfo.Processor()
@@ -1003,7 +1095,7 @@ class ProcessorTile(Tile):
 class MemoryTile(Tile):
     ID, NAME, GROUP = 'ram', 'RAM', 'System'
     ABOUT = 'Memory in use as a ring. A click opens Task Manager.'
-    WIDTH = 1.9
+    WIDTH = 2.05
 
     def setup(self):
         self.share, self.used, self.total = sysinfo.memory()
@@ -1051,7 +1143,7 @@ class NetworkTile(Tile):
 class BatteryTile(Tile):
     ID, NAME, GROUP = 'battery', 'Battery', 'System'
     ABOUT = 'Charge level as a filling gauge, with the charging state.'
-    WIDTH = 2.5
+    WIDTH = 2.15
 
     def setup(self):
         self.state = sysinfo.battery()
@@ -1793,7 +1885,7 @@ class MediaTile(Tile):
 class VolumeTile(Tile):
     ID, NAME, GROUP = 'volume', 'Volume', 'Media & Audio'
     ABOUT = 'Volume, the switch between speakers and headphones, and the microphone. Scroll to change the volume.'
-    WIDTH = 1.7
+    WIDTH = 1.5
 
     def setup(self):
         self.level = None
@@ -2072,7 +2164,7 @@ def sound_sides():
 class TimerTile(Tile):
     ID, NAME, GROUP = 'timer', 'Timer', 'Productivity'
     ABOUT = 'A countdown that starts in one click.'
-    WIDTH = 2.4
+    WIDTH = 2.15
     PRESETS = (1, 3, 5, 10, 15, 25, 45, 60)
 
     def setup(self):
@@ -2161,7 +2253,7 @@ class TimerTile(Tile):
 class StopwatchTile(Tile):
     ID, NAME, GROUP = 'stopwatch', 'Stopwatch', 'Productivity'
     ABOUT = 'Start, pause and lap; the card keeps every lap.'
-    WIDTH = 2.7
+    WIDTH = 2.35
 
     def setup(self):
         self.started: float | None = None
@@ -2266,7 +2358,7 @@ class StopwatchTile(Tile):
 class PomodoroTile(Tile):
     ID, NAME, GROUP = 'pomodoro', 'Pomodoro', 'Productivity'
     ABOUT = 'Focus rounds of 25 minutes with breaks between them.'
-    WIDTH = 2.6
+    WIDTH = 2.3
     FOCUS, BREAK, LONG = 25 * 60, 5 * 60, 15 * 60
 
     def setup(self):
@@ -2355,7 +2447,7 @@ class PomodoroTile(Tile):
 class NotesTile(Tile):
     ID, NAME, GROUP = 'notes', 'Notes', 'Productivity'
     ABOUT = 'Your note, one click from editing.'
-    WIDTH = 2.8
+    WIDTH = 2.35
 
     def setup(self):
         self.saver = QTimer(self)
@@ -2433,7 +2525,7 @@ class _Month(QWidget):
 class ClockTile(Tile):
     ID, NAME, GROUP = 'clock', 'Clock', 'Clocks'
     ABOUT = 'The time and date, in 12- or 24-hour format. A click shows the month.'
-    WIDTH = 2.3
+    WIDTH = 2.15
 
     def tick(self):
         self.update()
@@ -2471,7 +2563,7 @@ class ClockTile(Tile):
 class WeatherTile(Tile):
     ID, NAME, GROUP = 'weather', 'Weather', 'Weather'
     ABOUT = 'Temperature and conditions for the city set in Settings, with a three-day forecast.'
-    WIDTH = 2.6
+    WIDTH = 2.25
     EVERY = 15 * 60
 
     def setup(self):
@@ -2575,11 +2667,11 @@ class _UsageBarRow(QWidget):
         word = 'used' if self.show_used else 'left'
         pct_text = f'{pct}% {word}'
         reset_text = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24)
-        L.text(painter, QRectF(0, 0, 84, 20), self.window.get('label', ''), look.c(look.text), 13, 600,
+        L.text(painter, QRectF(0, 0, 68, 20), self.window.get('label', ''), look.c(look.text), 13, 600,
                Qt.AlignLeft | Qt.AlignVCenter)
-        L.text(painter, QRectF(w - 78, 0, 78, 20), pct_text, look.c(look.text), 13, 600,
+        L.text(painter, QRectF(w - 74, 0, 74, 20), pct_text, look.c(look.text), 13, 600,
                Qt.AlignRight | Qt.AlignVCenter)
-        L.text(painter, QRectF(80, 0, max(0, w - 164), 20), reset_text, look.c(look.sub), 12, 400,
+        L.text(painter, QRectF(68, 0, max(0, w - 146), 20), reset_text, look.c(look.sub), 12, 400,
                Qt.AlignRight | Qt.AlignVCenter)
         bar_rect = QRectF(0, 25, w, 6)
         L.bar(painter, bar_rect, share, ai.health_color(left, look.dark), look.c(look.track))
@@ -2588,12 +2680,15 @@ class _UsageBarRow(QWidget):
 class _AITile(Tile):
     GROUP = 'AI'
     PROVIDER = ''
+    MIN_WIDTH = 2.6
 
     def setup(self):
         self._ticks = 0
         self._preview = False
         self._card_rows: list[tuple[str, int, _UsageBarRow]] = []
         self._mode_sub: QLabel | None = None
+        self._providers_box: QVBoxLayout | None = None
+        self._card_multi = False
         self.dock.ai.changed.connect(self._ai_changed)
         if not self.dock.testing and time.monotonic() - self.dock.ai._last_poll > 30.0:
             self.dock.ai.fetch()
@@ -2603,6 +2698,16 @@ class _AITile(Tile):
             self.dock.ai.changed.disconnect(self._ai_changed)
         except (RuntimeError, TypeError):
             pass
+
+    def enabled_providers(self) -> list[str]:
+        raw = self.dock.cfg.get('ai_enabled')
+        chosen = [p for p in (raw if isinstance(raw, list) else ai.PROVIDERS) if p in ai.PROVIDERS]
+        return chosen or list(ai.PROVIDERS)
+
+    def active_card_providers(self) -> tuple[str, ...]:
+        if self._card_multi:
+            return tuple(self.enabled_providers())
+        return (self.PROVIDER,) if self.PROVIDER else ai.PROVIDERS
 
     def _ai_changed(self, _):
         self.update()
@@ -2623,13 +2728,14 @@ class _AITile(Tile):
                     pass
         if self._mode_sub is not None:
             try:
-                self._mode_sub.setText(self._subtitle_text(snap))
+                self._mode_sub.setText(self._subtitle_text(snap, self.active_card_providers()))
             except RuntimeError:
                 self._mode_sub = None
 
     def card_closed(self):
         self._card_rows = []
         self._mode_sub = None
+        self._providers_box = None
         super().card_closed()
 
     def tick(self):
@@ -2650,13 +2756,13 @@ class _AITile(Tile):
             if self.PROVIDER:
                 if not live.get(self.PROVIDER, {}).get('connected'):
                     return ai.sample_snapshot()
-            elif not any(s.get('connected') for s in live.values()):
+            elif not any(live.get(p, {}).get('connected') for p in self.enabled_providers()):
                 return ai.sample_snapshot()
         return live
 
     def _paint_rows(self, painter: QPainter, area: QRectF, look: L.Look,
                     rows: list[tuple[str | None, str, dict]]) -> None:
-        """Draw two compact limit rows (optional provider icon, label, bar, reset timer, percent)."""
+        """Draw two compact limit rows, adapting cleanly as the widget is widened or narrowed."""
         px = {'S': 10, 'M': 11, 'L': 12}.get(self.dock.cfg['size'], 11)
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         row_h = px * 1.24
@@ -2665,9 +2771,9 @@ class _AITile(Tile):
         top_y = area.center().y() - total_h / 2
         has_icons = any(p is not None for p, _, _ in rows)
         icon_s = round(px * 1.15) if has_icons else 0
-        label_w = round(px * (4.7 if has_icons else 4.2))
-        pct_w = round(px * 2.9)
-        reset_w = round(px * 4.1)
+        label_w = round(px * (4.4 if has_icons else 4.0))
+        pct_w = round(px * 2.8)
+        reset_w = round(px * 3.9)
 
         for idx, (provider, label, window) in enumerate(rows[:2]):
             y = top_y + idx * (row_h + gap_y)
@@ -2675,20 +2781,27 @@ class _AITile(Tile):
             if has_icons and provider:
                 ai.paint_provider_mark(painter, QRectF(x, y + (row_h - icon_s) / 2, icon_s, icon_s),
                                        provider, look.dark)
-                x += icon_s + 5
-            L.text(painter, QRectF(x, y, label_w, row_h), label, look.c(look.text), px, 600,
-                   Qt.AlignLeft | Qt.AlignVCenter)
+                x += icon_s + 4
             pct, share, left = ai.shown_value(window, show_used=show_used)
             right = area.right()
             L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), f'{pct}%', look.c(look.text), px, 600,
                    Qt.AlignRight | Qt.AlignVCenter)
-            reset = ai.format_reset(window.get('resets_at'))
+            avail_mid = (right - pct_w - 3) - x
+            # Compact fallback if narrowed: hide the bar first, then the reset timer if very narrow
+            show_reset = avail_mid >= label_w + reset_w + 4
             reset_right = right - pct_w - 3
-            L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset, look.c(look.sub), px, 400,
-                   Qt.AlignRight | Qt.AlignVCenter)
-            bar_left = x + label_w + 5
-            bar_right = reset_right - reset_w - 5
-            if bar_right - bar_left >= 12:
+            if show_reset:
+                reset = ai.format_reset(window.get('resets_at'))
+                L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset, look.c(look.sub), px, 400,
+                       Qt.AlignRight | Qt.AlignVCenter)
+                bar_right = reset_right - reset_w - 5
+            else:
+                bar_right = reset_right
+            max_label = max(24.0, bar_right - x)
+            L.text(painter, QRectF(x, y, min(label_w, max_label), row_h), label, look.c(look.text), px, 600,
+                   Qt.AlignLeft | Qt.AlignVCenter)
+            bar_left = x + label_w + 4
+            if show_reset and bar_right - bar_left >= 12:
                 bar_h = max(3.5, round(px * 0.36))
                 L.bar(painter, QRectF(bar_left, y + (row_h - bar_h) / 2, bar_right - bar_left, bar_h),
                       share, ai.health_color(left, look.dark), look.c(look.track))
@@ -2735,7 +2848,64 @@ class _AITile(Tile):
                        lambda: self.set_show_used(not show_used))
         menu.addSeparator()
 
-    def _open_ai_card(self, providers: tuple[str, ...], pick_pair: bool = False) -> None:
+    def _populate_provider_rows(self, providers: tuple[str, ...]) -> None:
+        if self._providers_box is None:
+            return
+        while self._providers_box.count():
+            item = self._providers_box.takeAt(0)
+            old_w = item.widget()
+            if old_w is not None:
+                old_w.hide()
+                old_w.setParent(None)
+                old_w.deleteLater()
+        self._card_rows = []
+        snap = self.snapshot()
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        clock24 = bool(self.dock.cfg.get('clock24', False))
+        ratio = self.devicePixelRatioF() or 2.0
+
+        for provider in providers:
+            info = ai.INFO[provider]
+            state = snap.get(provider) or {}
+            block = QWidget()
+            block_lay = QVBoxLayout(block)
+            block_lay.setContentsMargins(0, 0, 0, 0)
+            block_lay.setSpacing(6)
+
+            head = QHBoxLayout()
+            head.setSpacing(8)
+            badge = QLabel()
+            badge.setPixmap(ai.provider_pixmap(provider, 18, self.look.dark, ratio))
+            badge.setFixedSize(18, 18)
+            head.addWidget(badge)
+            plan = f" · {state['plan']}" if state.get('plan') else ''
+            title_lbl = _label(f"{info['name']}{plan}")
+            title_lbl.setStyleSheet('font-weight: 600;')
+            head.addWidget(title_lbl, 1)
+            block_lay.addLayout(head)
+
+            if state.get('connected') and state.get('windows'):
+                for idx, win_data in enumerate(state['windows']):
+                    bar_row = _UsageBarRow(self.look, win_data, show_used, clock24)
+                    self._card_rows.append((provider, idx, bar_row))
+                    block_lay.addWidget(bar_row)
+            else:
+                note = state.get('error') or info['hint']
+                block_lay.addWidget(_label(note, 'sub'))
+
+            self._providers_box.addWidget(block)
+
+        self._providers_box.invalidate()
+        self._providers_box.activate()
+        host = self._providers_box.parentWidget()
+        if host is not None:
+            host.adjustSize()
+        if self._mode_sub is not None:
+            self._mode_sub.setText(self._subtitle_text(snap, providers))
+
+    def _open_ai_card(self, providers: tuple[str, ...], multi_service: bool = False) -> None:
+        self._card_multi = multi_service
+        active = tuple(self.enabled_providers()) if multi_service else providers
         snap = self.snapshot()
         content = QWidget()
         layout = QVBoxLayout(content)
@@ -2750,44 +2920,41 @@ class _AITile(Tile):
         header.addWidget(refresh_btn)
         layout.addLayout(header)
 
-        self._mode_sub = _label(self._subtitle_text(snap, providers), 'sub')
+        self._mode_sub = _label(self._subtitle_text(snap, active), 'sub')
         layout.addWidget(self._mode_sub)
-        self._card_rows = []
+
+        providers_host = QWidget()
+        self._providers_box = QVBoxLayout(providers_host)
+        self._providers_box.setContentsMargins(0, 0, 0, 0)
+        self._providers_box.setSpacing(10)
+        layout.addWidget(providers_host)
+        self._populate_provider_rows(active)
+
+        # Collapsible Settings dropdown — hidden until clicked so the card stays clean and compact
+        toggle_btn = _button('Settings  ▾', name='row')
+        layout.addWidget(toggle_btn)
+
+        drawer = QWidget()
+        drawer.setVisible(False)
+        drawer_lay = QVBoxLayout(drawer)
+        drawer_lay.setContentsMargins(2, 2, 2, 0)
+        drawer_lay.setSpacing(8)
+        layout.addWidget(drawer)
+
+        def toggle_drawer():
+            open_now = drawer.isHidden()
+            drawer.setVisible(open_now)
+            toggle_btn.setText('Settings  ▴' if open_now else 'Settings  ▾')
+            if self.card is not None:
+                self.card.refit()
+
+        toggle_btn.clicked.connect(toggle_drawer)
+
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
-        clock24 = bool(self.dock.cfg.get('clock24', False))
-        ratio = self.devicePixelRatioF() or 2.0
-
-        for provider in providers:
-            info = ai.INFO[provider]
-            state = snap.get(provider) or {}
-            head = QHBoxLayout()
-            head.setSpacing(8)
-            badge = QLabel()
-            badge.setPixmap(ai.provider_pixmap(provider, 18, self.look.dark, ratio))
-            badge.setFixedSize(18, 18)
-            head.addWidget(badge)
-            plan = f" · {state['plan']}" if state.get('plan') else ''
-            title_lbl = _label(f"{info['name']}{plan}")
-            title_lbl.setStyleSheet('font-weight: 600;')
-            head.addWidget(title_lbl, 1)
-            layout.addLayout(head)
-
-            if state.get('connected') and state.get('windows'):
-                for idx, win_data in enumerate(state['windows']):
-                    bar_row = _UsageBarRow(self.look, win_data, show_used, clock24)
-                    self._card_rows.append((provider, idx, bar_row))
-                    layout.addWidget(bar_row)
-                if state.get('error'):
-                    layout.addWidget(_label(state['error'], 'sub'))
-            else:
-                note = state.get('error') or info['hint']
-                layout.addWidget(_label(note, 'sub'))
-
-        layout.addSpacing(2)
         mode_row = QHBoxLayout()
         mode_row.setSpacing(6)
         mode_row.addWidget(_label('Display', 'sub'))
-        mode_group = QButtonGroup(content)
+        mode_group = QButtonGroup(drawer)
         mode_group.setExclusive(True)
         for flag, word in ((False, 'Remaining'), (True, 'Used')):
             btn = _button(word, lambda _=False, f=flag: self.set_show_used(f), checkable=True)
@@ -2795,50 +2962,103 @@ class _AITile(Tile):
             mode_group.addButton(btn)
             mode_row.addWidget(btn)
         mode_row.addStretch(1)
-        layout.addLayout(mode_row)
+        drawer_lay.addLayout(mode_row)
 
-        if pick_pair:
-            pair_row = QHBoxLayout()
+        if multi_service:
+            # Show/hide AI services completely from both the card and the bar tile
+            svc_row = QHBoxLayout()
+            svc_row.setSpacing(6)
+            svc_row.addWidget(_label('Services', 'sub'))
+            svc_buttons: dict[str, QPushButton] = {}
+
+            pair_holder = QWidget()
+            pair_row = QHBoxLayout(pair_holder)
+            pair_row.setContentsMargins(0, 0, 0, 0)
             pair_row.setSpacing(6)
             pair_row.addWidget(_label('On bar', 'sub'))
             pair_buttons: dict[str, QPushButton] = {}
-            current_pair = [p for p in (self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt']) if p in ai.PROVIDERS]
-            if len(current_pair) < 2:
-                for candidate in ai.PROVIDERS:
-                    if candidate not in current_pair:
-                        current_pair.append(candidate)
-                    if len(current_pair) == 2:
-                        break
 
-            def choose_provider(picked: str):
-                chosen = list(self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt'])
-                chosen = [p for p in chosen if p in ai.PROVIDERS]
+            def sync_pair_visibility():
+                enabled_now = self.enabled_providers()
+                pair_holder.setVisible(len(enabled_now) > 2)
+                pair_now = [p for p in (self.dock.cfg.get('ai_pair') or []) if p in enabled_now]
+                for extra in enabled_now:
+                    if len(pair_now) >= 2:
+                        break
+                    if extra not in pair_now:
+                        pair_now.append(extra)
+                for key, b in pair_buttons.items():
+                    b.setVisible(key in enabled_now)
+                    b.blockSignals(True)
+                    b.setChecked(key in pair_now[:2])
+                    b.blockSignals(False)
+
+            def toggle_service(picked: str):
+                enabled_now = self.enabled_providers()
+                if picked in enabled_now:
+                    if len(enabled_now) <= 1:          # keep at least one AI service enabled
+                        svc_buttons[picked].blockSignals(True)
+                        svc_buttons[picked].setChecked(True)
+                        svc_buttons[picked].blockSignals(False)
+                        return
+                    enabled_now = [p for p in enabled_now if p != picked]
+                else:
+                    enabled_now = [p for p in ai.PROVIDERS if p in enabled_now or p == picked]
+                self.dock.cfg['ai_enabled'] = enabled_now
+                # Keep preferred bar pair aligned with enabled services
+                pair_now = [p for p in (self.dock.cfg.get('ai_pair') or []) if p in enabled_now]
+                for extra in enabled_now:
+                    if len(pair_now) >= 2:
+                        break
+                    if extra not in pair_now:
+                        pair_now.append(extra)
+                self.dock.cfg['ai_pair'] = pair_now[:2]
+                for key, b in svc_buttons.items():
+                    b.blockSignals(True)
+                    b.setChecked(key in enabled_now)
+                    b.blockSignals(False)
+                sync_pair_visibility()
+                self._populate_provider_rows(tuple(enabled_now))
+                self.dock.changed('ai')
+                if not self.dock.testing:
+                    self.dock.ai.fetch()
+                if self.card is not None:
+                    self.card.refit()
+
+            for p in ai.PROVIDERS:
+                btn = _button(ai.INFO[p]['short'], lambda _=False, key=p: toggle_service(key), checkable=True)
+                btn.setChecked(p in active)
+                svc_buttons[p] = btn
+                svc_row.addWidget(btn)
+            svc_row.addStretch(1)
+            drawer_lay.addLayout(svc_row)
+
+            def choose_bar_pair(picked: str):
+                enabled_now = self.enabled_providers()
+                chosen = [p for p in (self.dock.cfg.get('ai_pair') or []) if p in enabled_now]
                 if picked in chosen and len(chosen) > 1:
-                    for extra in ai.PROVIDERS:
+                    for extra in enabled_now:
                         if extra not in chosen:
                             chosen = [p for p in chosen if p != picked] + [extra]
                             break
                 elif picked not in chosen:
                     chosen = [chosen[-1], picked] if chosen else [picked]
                 self.dock.cfg['ai_pair'] = chosen[:2]
-                for key, b in pair_buttons.items():
-                    b.blockSignals(True)
-                    b.setChecked(key in self.dock.cfg['ai_pair'])
-                    b.blockSignals(False)
+                sync_pair_visibility()
                 self.dock.changed('ai')
 
             for p in ai.PROVIDERS:
-                btn = _button(ai.INFO[p]['short'], lambda _=False, key=p: choose_provider(key), checkable=True)
-                btn.setChecked(p in current_pair[:2])
+                btn = _button(ai.INFO[p]['short'], lambda _=False, key=p: choose_bar_pair(key), checkable=True)
                 pair_buttons[p] = btn
                 pair_row.addWidget(btn)
             pair_row.addStretch(1)
-            layout.addLayout(pair_row)
+            drawer_lay.addWidget(pair_holder)
+            sync_pair_visibility()
 
         warn_row = QHBoxLayout()
         warn_row.setSpacing(6)
         warn_row.addWidget(_label('Low alert', 'sub'))
-        warn_group = QButtonGroup(content)
+        warn_group = QButtonGroup(drawer)
         warn_group.setExclusive(True)
         warn_on = bool(self.dock.cfg.get('ai_warn_low', True))
 
@@ -2852,19 +3072,20 @@ class _AITile(Tile):
             warn_group.addButton(btn)
             warn_row.addWidget(btn)
         warn_row.addStretch(1)
-        layout.addLayout(warn_row)
+        drawer_lay.addLayout(warn_row)
 
-        self.open_card(content, 348)
+        self.open_card(content, 352)
 
 
 class AILimitsTile(_AITile):
     ID, NAME = 'ai_limits', 'AI Limits'
     ABOUT = 'Two of your AI plans on one tile — Claude, ChatGPT or Gemini — showing how much is left and ' \
             'when each timer resets.'
-    WIDTH = 6.0
+    WIDTH = 5.4
 
     def chosen_rows(self, snap: dict[str, dict]) -> list[tuple[str | None, str, dict]]:
-        connected = [p for p in ai.PROVIDERS if snap.get(p, {}).get('connected') and snap[p].get('windows')]
+        enabled = self.enabled_providers()
+        connected = [p for p in enabled if snap.get(p, {}).get('connected') and snap[p].get('windows')]
         preferred = [p for p in (self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt']) if p in connected]
         ordered = preferred + [p for p in connected if p not in preferred]
         if len(ordered) >= 2:
@@ -2884,7 +3105,7 @@ class AILimitsTile(_AITile):
     def paint(self, painter, rect, look):
         snap = self.snapshot()
         rows = self.chosen_rows(snap)
-        area = rect.adjusted(8, 0, -8, 0)
+        area = rect.adjusted(7, 0, -7, 0)
         if len(rows) >= 2:
             self._paint_rows(painter, area, look, rows)
         elif len(rows) == 1:
@@ -2893,22 +3114,24 @@ class AILimitsTile(_AITile):
             badge_s = side * 0.64
             ai.paint_provider_mark(painter, QRectF(rect.x() + 7, rect.center().y() - badge_s / 2, badge_s, badge_s),
                                    provider or 'claude', look.dark)
-            self._paint_single_window(painter, QRectF(rect.x() + badge_s + 13, rect.y(),
-                                                      rect.width() - badge_s - 21, side), label, window)
+            self._paint_single_window(painter, QRectF(rect.x() + badge_s + 12, rect.y(),
+                                                      rect.width() - badge_s - 19, side), label, window)
         else:
+            enabled = self.enabled_providers()
+            first = enabled[0] if enabled else 'claude'
             side = rect.height()
             badge_s = side * 0.62
-            ai.paint_provider_mark(painter, QRectF(rect.x() + 8, rect.center().y() - badge_s / 2, badge_s, badge_s),
-                                   'claude', look.dark)
-            self.lines(painter, QRectF(rect.x() + badge_s + 14, rect.y(), rect.width() - badge_s - 22, side),
+            ai.paint_provider_mark(painter, QRectF(rect.x() + 7, rect.center().y() - badge_s / 2, badge_s, badge_s),
+                                   first, look.dark)
+            self.lines(painter, QRectF(rect.x() + badge_s + 13, rect.y(), rect.width() - badge_s - 20, side),
                        'AI Limits', 'Click to connect')
 
     def click(self, pos):
-        self._open_ai_card(ai.PROVIDERS, pick_pair=True)
+        self._open_ai_card(tuple(self.enabled_providers()), multi_service=True)
 
 
 class _SingleProviderAITile(_AITile):
-    WIDTH = 5.7
+    WIDTH = 5.1
 
     def paint(self, painter, rect, look):
         snap = self.snapshot()
@@ -2917,7 +3140,7 @@ class _SingleProviderAITile(_AITile):
         badge_s = side * 0.66
         ai.paint_provider_mark(painter, QRectF(rect.x() + 7, rect.center().y() - badge_s / 2, badge_s, badge_s),
                                self.PROVIDER, look.dark)
-        right_area = QRectF(rect.x() + badge_s + 13, rect.y(), rect.width() - badge_s - 21, side)
+        right_area = QRectF(rect.x() + badge_s + 12, rect.y(), rect.width() - badge_s - 19, side)
         windows = state.get('windows') or []
         if state.get('connected') and len(windows) >= 2:
             rows = [(None, windows[0]['label'], windows[0]), (None, windows[1]['label'], windows[1])]
@@ -2929,7 +3152,7 @@ class _SingleProviderAITile(_AITile):
             self.lines(painter, right_area, ai.INFO[self.PROVIDER]['short'], status)
 
     def click(self, pos):
-        self._open_ai_card((self.PROVIDER,), pick_pair=False)
+        self._open_ai_card((self.PROVIDER,), multi_service=False)
 
 
 class ClaudeTile(_SingleProviderAITile):

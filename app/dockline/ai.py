@@ -963,7 +963,12 @@ class AIUsage(QObject):
         mono = time.monotonic()
         updated = dict(self.latest)
         alerts: list[tuple[str, str, float]] = []
+        enabled = set(self.cfg.get('ai_enabled') or PROVIDERS)
+        individual = set(self.cfg.get('widgets') or ())
+        active = enabled | (individual & set(PROVIDERS))
         for provider in PROVIDERS:
+            if provider not in active:
+                continue
             if not force and mono < self._backoff_until.get(provider, 0.0):
                 continue
             previous = self.latest.get(provider) or _empty_state(False)

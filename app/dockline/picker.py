@@ -115,8 +115,8 @@ class Picker(QWidget):
         self.search.setPlaceholderText('Search widgets')
         self.search.textChanged.connect(lambda _: self.refresh())
         main.addWidget(self.search)
-        note = QLabel('Click a widget to add it to the dock or remove it. Drag widgets along the dock to '
-                      'change their order.')
+        note = QLabel('Click a widget to add or remove it. Drag widgets along the dock to reorder them, or '
+                      'drag a widget\'s right handle to resize it (double-click the handle to reset).')
         note.setObjectName('sub')
         note.setWordWrap(True)
         main.addWidget(note)
@@ -165,8 +165,8 @@ class Picker(QWidget):
         self.search.setPlaceholderText('Search widgets')
         self.search.textChanged.connect(lambda _: self.refresh())
         main.addWidget(self.search)
-        note = QLabel('Click a widget to add it to the dock or remove it. Drag widgets along the dock to '
-                      'change their order.')
+        note = QLabel('Click a widget to add or remove it. Drag widgets along the dock to reorder them, or '
+                      'drag a widget\'s right handle to resize it (double-click the handle to reset).')
         note.setObjectName('sub')
         note.setWordWrap(True)
         main.addWidget(note)

@@ -666,5 +666,69 @@ class AIUsageTests(Temp):
                          [('Pro', 15.0, True), ('Flash', 0.0, True)])
 
 
+    def test_ai_settings_dropdown_and_hiding_services(self):
+        from PySide6.QtWidgets import QPushButton
+        from dockline.dock import Dock
+
+        cfg = Config(None)
+        cfg['widgets'] = ['ai_limits']
+        dock = Dock(cfg, testing=True)
+        ai_tile = next(tile for tile in dock.tiles if tile.ID == 'ai_limits')
+        ai_tile.click(ai_tile.rect().center())
+        card = ai_tile.card
+        toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+        # Settings drawer starts collapsed
+        svc_chatgpt = next(b for b in card.findChildren(QPushButton) if b.text() == 'ChatGPT')
+        self.assertTrue(svc_chatgpt.parentWidget().isHidden())
+        toggle.click()
+        self.assertFalse(svc_chatgpt.parentWidget().isHidden())
+
+        # Turning off ChatGPT removes it from enabled_providers, card rows, and bar rows
+        svc_chatgpt.click()
+        self.assertEqual(cfg['ai_enabled'], ['claude', 'gemini'])
+        self.assertEqual([r[1] for r in ai_tile.chosen_rows(ai_tile.snapshot())], ['Claude', 'Gemini'])
+        self.assertNotIn('chatgpt', {prov for prov, _, _ in ai_tile._card_rows})
+
+        toggle.click()
+        self.assertTrue(svc_chatgpt.parentWidget().isHidden())
+        card.close()
+        dock.deleteLater()
+
+    def test_widget_resize_handles_and_reset(self):
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from dockline.dock import Dock
+
+        cfg = Config(None)
+        cfg['widgets'] = ['start', 'weather', 'clock']
+        dock = Dock(cfg, testing=True)
+        dock.set_editing(True)
+        start_tile = next(tile for tile in dock.tiles if tile.ID == 'start')
+        weather_tile = next(tile for tile in dock.tiles if tile.ID == 'weather')
+        self.assertFalse(start_tile.resizable())
+        self.assertTrue(weather_tile.resizable())
+
+        default_w = weather_tile.width()
+        grip_pt = weather_tile.handle_rect().center()
+        press = QMouseEvent(QEvent.MouseButtonPress, grip_pt, QPointF(200, 20), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        move = QMouseEvent(QEvent.MouseMove, grip_pt + QPointF(24, 0), QPointF(224, 20), Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+        release = QMouseEvent(QEvent.MouseButtonRelease, grip_pt + QPointF(24, 0), QPointF(224, 20), Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+        weather_tile.mousePressEvent(press)
+        weather_tile.mouseMoveEvent(move)
+        weather_tile.mouseReleaseEvent(release)
+
+        self.assertEqual(weather_tile.width(), default_w + 24)
+        self.assertIn('weather', cfg['widget_widths'])
+
+        # Rebuilding the dock preserves the saved custom width, and reset_width restores default
+        dock.rebuild()
+        weather_tile = next(tile for tile in dock.tiles if tile.ID == 'weather')
+        self.assertEqual(weather_tile.width(), default_w + 24)
+        weather_tile.reset_width()
+        self.assertEqual(weather_tile.width(), default_w)
+        self.assertNotIn('weather', cfg['widget_widths'])
+        dock.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()

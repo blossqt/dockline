@@ -86,6 +86,23 @@ class Card(QWidget):
         if motion.on():
             self.grow()
 
+    def refit(self) -> None:
+        """Content inside an open card grew or shrank: resize and keep it 8 px clear of the dock."""
+        if self.content.layout() is not None:
+            self.content.layout().invalidate()
+            self.content.layout().activate()
+        self.content.adjustSize()
+        self.layout().invalidate()
+        self.layout().activate()
+        self.resize(self.width(), self.layout().sizeHint().height())
+        if not self.isVisible() or self.tile.dock.testing:
+            return
+        dock = self.tile.dock
+        dock_top = dock.mapToGlobal(QPoint(0, 0)).y()
+        y = dock_top + dock.height() + 8 if dock.edge == 'top' else dock_top - self.height() - 8
+        self.move(self.x(), y)
+        self.update()
+
     def origin(self) -> QPointF:
         """Where the card grows from and shrinks to: its widget's middle, on the dock's side."""
         centre = self.tile.mapToGlobal(QPoint(self.tile.width() // 2, 0)).x() - self.x()
