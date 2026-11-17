@@ -730,5 +730,61 @@ class AIUsageTests(Temp):
         dock.deleteLater()
 
 
+    def test_ai_card_stays_on_screen_when_toggling_services(self):
+        """Showing or hiding an AI service inside an open card must grow/shrink upward from the dock
+        rather than letting Qt push the bottom of the card below the dock or off the screen."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication, QPushButton
+        from dockline import motion
+        from dockline.dock import Dock
+
+        real_motion = motion.on
+        motion.on = lambda: False
+        try:
+            cfg = Config(None)
+            cfg['ai_enabled'] = ['claude', 'gemini']
+            cfg['widgets'] = ['ai_limits']
+            dock = Dock(cfg, testing=False)
+            dock.ai.latest['chatgpt'] = {'connected': False, 'signed_in': False, 'plan': '', 'windows': [],
+                                         'updated_at': None, 'error': ''}
+            screen = QGuiApplication.primaryScreen().geometry()
+            dock_y = screen.bottom() - 58
+            dock.setGeometry(QRect(screen.center().x() - 200, dock_y, 400, 52))
+            dock.show()
+            QApplication.processEvents()
+
+            tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+            tile.click(tile.rect().center())
+            card = tile.card
+            QApplication.processEvents()
+            initial_bottom = card.geometry().bottom()
+            self.assertLessEqual(initial_bottom, dock_y - 7)
+            self.assertLessEqual(initial_bottom, screen.bottom())
+
+            toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+            toggle.click()
+            QApplication.processEvents()
+            self.assertEqual(card.geometry().bottom(), initial_bottom)
+
+            # Toggle ChatGPT ON (adds wrapped multi-line hint + On bar row) and process deferred LayoutRequest
+            chatgpt_btn = [b for b in card.findChildren(QPushButton) if b.text() == 'ChatGPT'][0]
+            chatgpt_btn.click()
+            QApplication.processEvents()
+            self.assertLessEqual(card.geometry().bottom(), initial_bottom)
+            self.assertGreaterEqual(card.geometry().top(), screen.top())
+
+            # Toggle ChatGPT OFF again
+            chatgpt_btn.click()
+            QApplication.processEvents()
+            self.assertEqual(card.geometry().bottom(), initial_bottom)
+
+            card.close()
+            dock.close()
+            dock.deleteLater()
+        finally:
+            motion.on = real_motion
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2358,7 +2358,7 @@ class StopwatchTile(Tile):
 class PomodoroTile(Tile):
     ID, NAME, GROUP = 'pomodoro', 'Pomodoro', 'Productivity'
     ABOUT = 'Focus rounds of 25 minutes with breaks between them.'
-    WIDTH = 2.3
+    WIDTH = 2.5
     FOCUS, BREAK, LONG = 25 * 60, 5 * 60, 15 * 60
 
     def setup(self):
@@ -2666,7 +2666,8 @@ class _UsageBarRow(QWidget):
         pct, share, left = ai.shown_value(self.window, show_used=self.show_used)
         word = 'used' if self.show_used else 'left'
         pct_text = f'{pct}% {word}'
-        reset_text = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24)
+        is_idle = self.window.get('resets_at') is None and left >= 99.9
+        reset_text = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24, idle=is_idle)
         L.text(painter, QRectF(0, 0, 68, 20), self.window.get('label', ''), look.c(look.text), 13, 600,
                Qt.AlignLeft | Qt.AlignVCenter)
         L.text(painter, QRectF(w - 74, 0, 74, 20), pct_text, look.c(look.text), 13, 600,
@@ -2894,6 +2895,7 @@ class _AITile(Tile):
                 block_lay.addWidget(_label(note, 'sub'))
 
             self._providers_box.addWidget(block)
+            block.show()
 
         self._providers_box.invalidate()
         self._providers_box.activate()

@@ -153,10 +153,11 @@ def format_reset(resets_at: float | None, now: float | None = None) -> str:
     return f'{when:%a} {when.day}'
 
 
-def format_reset_long(resets_at: float | None, clock24: bool = False, now: float | None = None) -> str:
+def format_reset_long(resets_at: float | None, clock24: bool = False, now: float | None = None,
+                      idle: bool = False) -> str:
     """Detailed reset text for popup cards."""
     if resets_at is None:
-        return 'Reset time unavailable'
+        return 'Starts on next message' if idle else 'Reset time unavailable'
     current = time.time() if now is None else now
     delta = resets_at - current
     if delta <= 0:

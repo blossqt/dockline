@@ -34,6 +34,7 @@ class Card(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setStyleSheet(L.card_css(self.look))
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(PAD, PAD, PAD, PAD)
         layout.addWidget(content)
         self.content = content
@@ -64,20 +65,41 @@ class Card(QWidget):
         painter.setBrush(self.look.c(self.look.panel))
         painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), RADIUS, RADIUS)
 
+    def _desired_height(self) -> int:
+        inner_w = max(1, self.width() - 2 * PAD)
+        self.content.setMinimumWidth(inner_w)
+        self.content.setMaximumWidth(inner_w)
+        if self.content.layout() is not None:
+            self.content.layout().invalidate()
+            self.content.layout().activate()
+        self.layout().invalidate()
+        self.layout().activate()
+        lay = self.layout()
+        h = lay.totalHeightForWidth(self.width()) if lay.hasHeightForWidth() else lay.sizeHint().height()
+        return max(40, h)
+
+    def _anchor_y(self, height: int, screen) -> int:
+        dock = self.tile.dock
+        dock_top = dock.mapToGlobal(QPoint(0, 0)).y()
+        y = dock_top + dock.height() + 8 if dock.edge == 'top' else dock_top - height - 8
+        return max(screen.top() + L.MARGIN, min(y, screen.bottom() - L.MARGIN - height))
+
     def open(self) -> None:
-        self.adjustSize()
+        h = self._desired_height()
         dock = self.tile.dock
         tile_rect = self.tile.rect()
         top_left = self.tile.mapToGlobal(QPoint(0, 0))
         screen = (dock.screen() or QGuiApplication.primaryScreen()).geometry()
+        max_h = max(120, screen.height() - dock.height() - 2 * L.MARGIN - 16)
+        h = min(h, max_h)
         x = top_left.x() + tile_rect.width() // 2 - self.width() // 2
         x = max(screen.left() + L.MARGIN, min(x, screen.right() - L.MARGIN - self.width()))
-        dock_top = dock.mapToGlobal(QPoint(0, 0)).y()
-        if dock.edge == 'top':
-            y = dock_top + dock.height() + 8
-        else:
-            y = dock_top - self.height() - 8
-        self.move(x, y)
+        y = self._anchor_y(h, screen)
+        self._placing = True
+        try:
+            self.setGeometry(x, y, self.width(), h)
+        finally:
+            self._placing = False
         if self.look.glass:
             win.round_corners(int(self.winId()), False)  # its own corners, drawn round its frosted pane
         self.show()
@@ -88,20 +110,36 @@ class Card(QWidget):
 
     def refit(self) -> None:
         """Content inside an open card grew or shrank: resize and keep it 8 px clear of the dock."""
-        if self.content.layout() is not None:
-            self.content.layout().invalidate()
-            self.content.layout().activate()
-        self.content.adjustSize()
-        self.layout().invalidate()
-        self.layout().activate()
-        self.resize(self.width(), self.layout().sizeHint().height())
+        h = self._desired_height()
         if not self.isVisible() or self.tile.dock.testing:
+            self.resize(self.width(), h)
             return
         dock = self.tile.dock
-        dock_top = dock.mapToGlobal(QPoint(0, 0)).y()
-        y = dock_top + dock.height() + 8 if dock.edge == 'top' else dock_top - self.height() - 8
-        self.move(self.x(), y)
+        screen = (dock.screen() or QGuiApplication.primaryScreen()).geometry()
+        max_h = max(120, screen.height() - dock.height() - 2 * L.MARGIN - 16)
+        h = min(h, max_h)
+        x = max(screen.left() + L.MARGIN, min(self.x(), screen.right() - L.MARGIN - self.width()))
+        y = self._anchor_y(h, screen)
+        self._placing = True
+        try:
+            self.setGeometry(x, y, self.width(), h)
+        finally:
+            self._placing = False
         self.update()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.isVisible() and not self.tile.dock.testing and not getattr(self, '_placing', False):
+            dock = self.tile.dock
+            screen = (dock.screen() or QGuiApplication.primaryScreen()).geometry()
+            y = self._anchor_y(self.height(), screen)
+            x = max(screen.left() + L.MARGIN, min(self.x(), screen.right() - L.MARGIN - self.width()))
+            if y != self.y() or x != self.x():
+                self._placing = True
+                try:
+                    self.move(x, y)
+                finally:
+                    self._placing = False
 
     def origin(self) -> QPointF:
         """Where the card grows from and shrinks to: its widget's middle, on the dock's side."""
