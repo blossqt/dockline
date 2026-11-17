@@ -112,6 +112,9 @@ def main(argv: list[str]) -> int:
         from . import __version__
         try:
             code, problem = _render(Path(tempfile.gettempdir()) / 'dockline-self-test', True), 'a card failed'
+            from . import media                  # Windows' media sessions must load in the built exe too
+            if code == 0 and not media.AVAILABLE:
+                code, problem = 1, 'the media API did not load'
         except Exception as error:               # the answer must still be written
             code, problem = 1, repr(error)
         if answer:
