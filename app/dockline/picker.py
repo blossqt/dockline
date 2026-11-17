@@ -142,10 +142,14 @@ class Picker(QWidget):
         title = QLabel('Widgets')
         title.setObjectName('title')
         main.addWidget(title)
-        row = QHBoxLayout()
-        row.setSpacing(8)
+        groups_box = QGridLayout()
+        groups_box.setContentsMargins(0, 0, 0, 0)
+        groups_box.setHorizontalSpacing(8)
+        groups_box.setVerticalSpacing(8)
         buttons = QButtonGroup(self)
-        for name in [ALL] + GROUPS:
+        names = [ALL] + GROUPS
+        per_row = 4 if len(names) > 7 else len(names)
+        for index, name in enumerate(names):
             button = QPushButton(name.replace('&', '&&'))         # '&' would be taken as a shortcut mark
             button.setCheckable(True)
             button.setChecked(name == ALL)
@@ -153,10 +157,10 @@ class Picker(QWidget):
             button.setCursor(Qt.PointingHandCursor)
             button.clicked.connect(lambda _=False, n=name: self.choose_group(n))
             buttons.addButton(button)
-            row.addWidget(button)
-        row.addStretch(1)
+            groups_box.addWidget(button, index // per_row, index % per_row)
+        groups_box.setColumnStretch(per_row, 1)
         self.group_buttons = buttons
-        main.addLayout(row)
+        main.addLayout(groups_box)
         self.search = QLineEdit()
         self.search.setPlaceholderText('Search widgets')
         self.search.textChanged.connect(lambda _: self.refresh())
@@ -174,6 +178,9 @@ class Picker(QWidget):
 
     def choose_group(self, name: str) -> None:
         self.group = name
+        if hasattr(self, 'group_buttons'):
+            for button in self.group_buttons.buttons():
+                button.setChecked(button.text().replace('&&', '&') == name)
         self.refresh()
 
     def refresh(self) -> None:
@@ -208,6 +215,7 @@ class Picker(QWidget):
         picture = None
         try:
             tile = widget(self.dock)
+            tile._preview = True
             try:
                 tile.tick()
             except Exception:

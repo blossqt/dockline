@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
-from . import audio, motion, shortcuts, sysinfo, weather, win
+from . import ai, audio, motion, shortcuts, sysinfo, weather, win
 from . import look as L
 from . import suitetheme as _theme
 from .card import Card
@@ -2543,8 +2543,413 @@ class WeatherTile(Tile):
         self.open_card(content, 300)
 
 
+# ================================================================ AI
+
+class _UsageBarRow(QWidget):
+    """One limit window inside an AI popup card: name, reset time, percent and health bar."""
+
+    HEIGHT = 38
+
+    def __init__(self, look: L.Look, window: dict, show_used: bool, clock24: bool):
+        super().__init__()
+        self.look = look
+        self.window = window
+        self.show_used = show_used
+        self.clock24 = clock24
+        self.setFixedHeight(self.HEIGHT)
+
+    def set_mode(self, show_used: bool) -> None:
+        self.show_used = show_used
+        self.update()
+
+    def set_window(self, window: dict) -> None:
+        self.window = window
+        self.update()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        look = self.look
+        w = self.width()
+        pct, share, left = ai.shown_value(self.window, show_used=self.show_used)
+        word = 'used' if self.show_used else 'left'
+        pct_text = f'{pct}% {word}'
+        reset_text = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24)
+        L.text(painter, QRectF(0, 0, 84, 20), self.window.get('label', ''), look.c(look.text), 13, 600,
+               Qt.AlignLeft | Qt.AlignVCenter)
+        L.text(painter, QRectF(w - 78, 0, 78, 20), pct_text, look.c(look.text), 13, 600,
+               Qt.AlignRight | Qt.AlignVCenter)
+        L.text(painter, QRectF(80, 0, max(0, w - 164), 20), reset_text, look.c(look.sub), 12, 400,
+               Qt.AlignRight | Qt.AlignVCenter)
+        bar_rect = QRectF(0, 25, w, 6)
+        L.bar(painter, bar_rect, share, ai.health_color(left, look.dark), look.c(look.track))
+
+
+class _AITile(Tile):
+    GROUP = 'AI'
+    PROVIDER = ''
+
+    def setup(self):
+        self._ticks = 0
+        self._preview = False
+        self._card_rows: list[tuple[str, int, _UsageBarRow]] = []
+        self._mode_sub: QLabel | None = None
+        self.dock.ai.changed.connect(self._ai_changed)
+        if not self.dock.testing and time.monotonic() - self.dock.ai._last_poll > 30.0:
+            self.dock.ai.fetch()
+
+    def retire(self):
+        try:
+            self.dock.ai.changed.disconnect(self._ai_changed)
+        except (RuntimeError, TypeError):
+            pass
+
+    def _ai_changed(self, _):
+        self.update()
+        self._sync_open_card()
+
+    def _sync_open_card(self) -> None:
+        if self.card is None:
+            return
+        snap = self.snapshot()
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        for provider, idx, row_widget in list(self._card_rows):
+            windows = snap.get(provider, {}).get('windows') or []
+            if idx < len(windows):
+                try:
+                    row_widget.set_window(windows[idx])
+                    row_widget.set_mode(show_used)
+                except RuntimeError:
+                    pass
+        if self._mode_sub is not None:
+            try:
+                self._mode_sub.setText(self._subtitle_text(snap))
+            except RuntimeError:
+                self._mode_sub = None
+
+    def card_closed(self):
+        self._card_rows = []
+        self._mode_sub = None
+        super().card_closed()
+
+    def tick(self):
+        self._ticks += 1
+        if not self.dock.testing:
+            if self._ticks % ai.WATCH_EVERY == 0:
+                self.dock.ai.watch_files()
+            if self._ticks % ai.POLL_EVERY == 0:
+                self.dock.ai.fetch()
+        if self._ticks % 15 == 0:
+            self.update()
+
+    def snapshot(self) -> dict[str, dict]:
+        if self.dock.testing:
+            return ai.sample_snapshot()
+        live = self.dock.ai.latest
+        if self._preview:
+            if self.PROVIDER:
+                if not live.get(self.PROVIDER, {}).get('connected'):
+                    return ai.sample_snapshot()
+            elif not any(s.get('connected') for s in live.values()):
+                return ai.sample_snapshot()
+        return live
+
+    def _paint_rows(self, painter: QPainter, area: QRectF, look: L.Look,
+                    rows: list[tuple[str | None, str, dict]]) -> None:
+        """Draw two compact limit rows (optional provider icon, label, bar, reset timer, percent)."""
+        px = {'S': 10, 'M': 11, 'L': 12}.get(self.dock.cfg['size'], 11)
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        row_h = px * 1.24
+        gap_y = max(2.0, area.height() * 0.08)
+        total_h = 2 * row_h + gap_y
+        top_y = area.center().y() - total_h / 2
+        has_icons = any(p is not None for p, _, _ in rows)
+        icon_s = round(px * 1.15) if has_icons else 0
+        label_w = round(px * (4.7 if has_icons else 4.2))
+        pct_w = round(px * 2.9)
+        reset_w = round(px * 4.1)
+
+        for idx, (provider, label, window) in enumerate(rows[:2]):
+            y = top_y + idx * (row_h + gap_y)
+            x = area.x()
+            if has_icons and provider:
+                ai.paint_provider_mark(painter, QRectF(x, y + (row_h - icon_s) / 2, icon_s, icon_s),
+                                       provider, look.dark)
+                x += icon_s + 5
+            L.text(painter, QRectF(x, y, label_w, row_h), label, look.c(look.text), px, 600,
+                   Qt.AlignLeft | Qt.AlignVCenter)
+            pct, share, left = ai.shown_value(window, show_used=show_used)
+            right = area.right()
+            L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), f'{pct}%', look.c(look.text), px, 600,
+                   Qt.AlignRight | Qt.AlignVCenter)
+            reset = ai.format_reset(window.get('resets_at'))
+            reset_right = right - pct_w - 3
+            L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset, look.c(look.sub), px, 400,
+                   Qt.AlignRight | Qt.AlignVCenter)
+            bar_left = x + label_w + 5
+            bar_right = reset_right - reset_w - 5
+            if bar_right - bar_left >= 12:
+                bar_h = max(3.5, round(px * 0.36))
+                L.bar(painter, QRectF(bar_left, y + (row_h - bar_h) / 2, bar_right - bar_left, bar_h),
+                      share, ai.health_color(left, look.dark), look.c(look.track))
+
+    def _paint_single_window(self, painter: QPainter, area: QRectF, look: L.Look,
+                             label: str, window: dict) -> None:
+        """Draw a single limit window with bold percentage, reset time and full-width bar."""
+        big, small = self.sizes()
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        pct, share, left = ai.shown_value(window, show_used=show_used)
+        reset = ai.format_reset(window.get('resets_at'))
+        top_h = small * 1.2
+        top_y = area.center().y() - (top_h + 9) / 2
+        L.text(painter, QRectF(area.x(), top_y, area.width() * 0.58, top_h), f'{label} · {pct}%',
+               look.c(look.text), small, 600, Qt.AlignLeft | Qt.AlignVCenter)
+        L.text(painter, QRectF(area.x() + area.width() * 0.55, top_y, area.width() * 0.45, top_h), reset,
+               look.c(look.sub), small, 400, Qt.AlignRight | Qt.AlignVCenter)
+        bar_h = max(4.0, round(big * 0.3))
+        L.bar(painter, QRectF(area.x(), top_y + top_h + 4, area.width(), bar_h),
+              share, ai.health_color(left, look.dark), look.c(look.track))
+
+    def _subtitle_text(self, snap: dict[str, dict], providers: tuple[str, ...] = ai.PROVIDERS) -> str:
+        mode = 'Allowance used' if self.dock.cfg.get('ai_show_used', False) else 'Allowance remaining'
+        stamps = [snap[p]['updated_at'] for p in providers
+                  if snap.get(p, {}).get('connected') and snap[p].get('updated_at')]
+        if stamps:
+            age = ai.format_age(max(stamps))
+            if age:
+                return f'{mode} · {age}'
+        return mode
+
+    def refresh_now(self) -> None:
+        self.dock.ai.fetch(force=True)
+
+    def set_show_used(self, show_used: bool) -> None:
+        self.dock.cfg['ai_show_used'] = bool(show_used)
+        self.dock.changed('ai')
+        self._sync_open_card()
+
+    def menu(self, menu, pos):
+        menu.addAction('Refresh limits', self.refresh_now)
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        menu.addAction('Show remaining %' if show_used else 'Show used %',
+                       lambda: self.set_show_used(not show_used))
+        menu.addSeparator()
+
+    def _open_ai_card(self, providers: tuple[str, ...], pick_pair: bool = False) -> None:
+        snap = self.snapshot()
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        header.addWidget(_label(self.NAME, 'title'), 1)
+        refresh_btn = _button(L.G['refresh'], self.refresh_now, 'icon')
+        refresh_btn.setToolTip('Refresh now')
+        header.addWidget(refresh_btn)
+        layout.addLayout(header)
+
+        self._mode_sub = _label(self._subtitle_text(snap, providers), 'sub')
+        layout.addWidget(self._mode_sub)
+        self._card_rows = []
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        clock24 = bool(self.dock.cfg.get('clock24', False))
+        ratio = self.devicePixelRatioF() or 2.0
+
+        for provider in providers:
+            info = ai.INFO[provider]
+            state = snap.get(provider) or {}
+            head = QHBoxLayout()
+            head.setSpacing(8)
+            badge = QLabel()
+            badge.setPixmap(ai.provider_pixmap(provider, 18, self.look.dark, ratio))
+            badge.setFixedSize(18, 18)
+            head.addWidget(badge)
+            plan = f" · {state['plan']}" if state.get('plan') else ''
+            title_lbl = _label(f"{info['name']}{plan}")
+            title_lbl.setStyleSheet('font-weight: 600;')
+            head.addWidget(title_lbl, 1)
+            layout.addLayout(head)
+
+            if state.get('connected') and state.get('windows'):
+                for idx, win_data in enumerate(state['windows']):
+                    bar_row = _UsageBarRow(self.look, win_data, show_used, clock24)
+                    self._card_rows.append((provider, idx, bar_row))
+                    layout.addWidget(bar_row)
+                if state.get('error'):
+                    layout.addWidget(_label(state['error'], 'sub'))
+            else:
+                note = state.get('error') or info['hint']
+                layout.addWidget(_label(note, 'sub'))
+
+        layout.addSpacing(2)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(6)
+        mode_row.addWidget(_label('Display', 'sub'))
+        mode_group = QButtonGroup(content)
+        mode_group.setExclusive(True)
+        for flag, word in ((False, 'Remaining'), (True, 'Used')):
+            btn = _button(word, lambda _=False, f=flag: self.set_show_used(f), checkable=True)
+            btn.setChecked(show_used == flag)
+            mode_group.addButton(btn)
+            mode_row.addWidget(btn)
+        mode_row.addStretch(1)
+        layout.addLayout(mode_row)
+
+        if pick_pair:
+            pair_row = QHBoxLayout()
+            pair_row.setSpacing(6)
+            pair_row.addWidget(_label('On bar', 'sub'))
+            pair_buttons: dict[str, QPushButton] = {}
+            current_pair = [p for p in (self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt']) if p in ai.PROVIDERS]
+            if len(current_pair) < 2:
+                for candidate in ai.PROVIDERS:
+                    if candidate not in current_pair:
+                        current_pair.append(candidate)
+                    if len(current_pair) == 2:
+                        break
+
+            def choose_provider(picked: str):
+                chosen = list(self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt'])
+                chosen = [p for p in chosen if p in ai.PROVIDERS]
+                if picked in chosen and len(chosen) > 1:
+                    for extra in ai.PROVIDERS:
+                        if extra not in chosen:
+                            chosen = [p for p in chosen if p != picked] + [extra]
+                            break
+                elif picked not in chosen:
+                    chosen = [chosen[-1], picked] if chosen else [picked]
+                self.dock.cfg['ai_pair'] = chosen[:2]
+                for key, b in pair_buttons.items():
+                    b.blockSignals(True)
+                    b.setChecked(key in self.dock.cfg['ai_pair'])
+                    b.blockSignals(False)
+                self.dock.changed('ai')
+
+            for p in ai.PROVIDERS:
+                btn = _button(ai.INFO[p]['short'], lambda _=False, key=p: choose_provider(key), checkable=True)
+                btn.setChecked(p in current_pair[:2])
+                pair_buttons[p] = btn
+                pair_row.addWidget(btn)
+            pair_row.addStretch(1)
+            layout.addLayout(pair_row)
+
+        warn_row = QHBoxLayout()
+        warn_row.setSpacing(6)
+        warn_row.addWidget(_label('Low alert', 'sub'))
+        warn_group = QButtonGroup(content)
+        warn_group.setExclusive(True)
+        warn_on = bool(self.dock.cfg.get('ai_warn_low', True))
+
+        def set_warn(flag: bool):
+            self.dock.cfg['ai_warn_low'] = bool(flag)
+            self.dock.cfg.save()
+
+        for flag, word in ((True, 'Below 15%'), (False, 'Off')):
+            btn = _button(word, lambda _=False, f=flag: set_warn(f), checkable=True)
+            btn.setChecked(warn_on == flag)
+            warn_group.addButton(btn)
+            warn_row.addWidget(btn)
+        warn_row.addStretch(1)
+        layout.addLayout(warn_row)
+
+        self.open_card(content, 348)
+
+
+class AILimitsTile(_AITile):
+    ID, NAME = 'ai_limits', 'AI Limits'
+    ABOUT = 'Two of your AI plans on one tile — Claude, ChatGPT or Gemini — showing how much is left and ' \
+            'when each timer resets.'
+    WIDTH = 6.0
+
+    def chosen_rows(self, snap: dict[str, dict]) -> list[tuple[str | None, str, dict]]:
+        connected = [p for p in ai.PROVIDERS if snap.get(p, {}).get('connected') and snap[p].get('windows')]
+        preferred = [p for p in (self.dock.cfg.get('ai_pair') or ['claude', 'chatgpt']) if p in connected]
+        ordered = preferred + [p for p in connected if p not in preferred]
+        if len(ordered) >= 2:
+            p1, p2 = ordered[0], ordered[1]
+            return [
+                (p1, ai.INFO[p1]['short'], snap[p1]['windows'][0]),
+                (p2, ai.INFO[p2]['short'], snap[p2]['windows'][0]),
+            ]
+        if len(ordered) == 1:
+            only = ordered[0]
+            wins = snap[only]['windows']
+            if len(wins) >= 2:
+                return [(only, wins[0]['label'], wins[0]), (only, wins[1]['label'], wins[1])]
+            return [(only, ai.INFO[only]['short'], wins[0])]
+        return []
+
+    def paint(self, painter, rect, look):
+        snap = self.snapshot()
+        rows = self.chosen_rows(snap)
+        area = rect.adjusted(8, 0, -8, 0)
+        if len(rows) >= 2:
+            self._paint_rows(painter, area, look, rows)
+        elif len(rows) == 1:
+            provider, label, window = rows[0]
+            side = rect.height()
+            badge_s = side * 0.64
+            ai.paint_provider_mark(painter, QRectF(rect.x() + 7, rect.center().y() - badge_s / 2, badge_s, badge_s),
+                                   provider or 'claude', look.dark)
+            self._paint_single_window(painter, QRectF(rect.x() + badge_s + 13, rect.y(),
+                                                      rect.width() - badge_s - 21, side), label, window)
+        else:
+            side = rect.height()
+            badge_s = side * 0.62
+            ai.paint_provider_mark(painter, QRectF(rect.x() + 8, rect.center().y() - badge_s / 2, badge_s, badge_s),
+                                   'claude', look.dark)
+            self.lines(painter, QRectF(rect.x() + badge_s + 14, rect.y(), rect.width() - badge_s - 22, side),
+                       'AI Limits', 'Click to connect')
+
+    def click(self, pos):
+        self._open_ai_card(ai.PROVIDERS, pick_pair=True)
+
+
+class _SingleProviderAITile(_AITile):
+    WIDTH = 5.7
+
+    def paint(self, painter, rect, look):
+        snap = self.snapshot()
+        state = snap.get(self.PROVIDER) or {}
+        side = rect.height()
+        badge_s = side * 0.66
+        ai.paint_provider_mark(painter, QRectF(rect.x() + 7, rect.center().y() - badge_s / 2, badge_s, badge_s),
+                               self.PROVIDER, look.dark)
+        right_area = QRectF(rect.x() + badge_s + 13, rect.y(), rect.width() - badge_s - 21, side)
+        windows = state.get('windows') or []
+        if state.get('connected') and len(windows) >= 2:
+            rows = [(None, windows[0]['label'], windows[0]), (None, windows[1]['label'], windows[1])]
+            self._paint_rows(painter, right_area, look, rows)
+        elif state.get('connected') and len(windows) == 1:
+            self._paint_single_window(painter, right_area, look, windows[0]['label'], windows[0])
+        else:
+            status = 'Session expired' if 'expired' in (state.get('error') or '').lower() else 'Sign in'
+            self.lines(painter, right_area, ai.INFO[self.PROVIDER]['short'], status)
+
+    def click(self, pos):
+        self._open_ai_card((self.PROVIDER,), pick_pair=False)
+
+
+class ClaudeTile(_SingleProviderAITile):
+    ID, NAME, PROVIDER = 'claude', 'Claude Usage', 'claude'
+    ABOUT = 'Your Claude session and weekly allowance left, and when each window resets.'
+
+
+class ChatGPTTile(_SingleProviderAITile):
+    ID, NAME, PROVIDER = 'chatgpt', 'ChatGPT Usage', 'chatgpt'
+    ABOUT = "Your ChatGPT plan's 5-hour and weekly Codex allowance left, and when each resets."
+
+
+class GeminiTile(_SingleProviderAITile):
+    ID, NAME, PROVIDER = 'gemini', 'Gemini Usage', 'gemini'
+    ABOUT = 'Your Gemini CLI Pro and Flash quota left, and when each bucket resets.'
+
+
 WIDGETS: list[type[Tile]] = [
     StartTile, TaskViewTile, AppsTile, SearchTile, RecycleTile, StorageTile, ScreenshotTile,
+    AILimitsTile, ClaudeTile, ChatGPTTile, GeminiTile,
     ProcessorTile, MemoryTile, NetworkTile, BatteryTile, TrayTile, LanguageTile, QuickSettingsTile, NotificationsTile, ShowDesktopTile,
     ThemeTile, DayProgressTile,
     MediaTile, VolumeTile,
@@ -2553,4 +2958,4 @@ WIDGETS: list[type[Tile]] = [
     WeatherTile,
 ]
 REGISTRY = {widget.ID: widget for widget in WIDGETS}
-GROUPS = ['Apps & Files', 'System', 'Media & Audio', 'Productivity', 'Clocks', 'Weather']
+GROUPS = ['Apps & Files', 'AI', 'System', 'Media & Audio', 'Productivity', 'Clocks', 'Weather']

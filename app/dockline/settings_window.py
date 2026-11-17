@@ -201,8 +201,8 @@ class SettingsWindow(QWidget):
             backup_row.addWidget(button)
         backup_row.addStretch(1)
         backup.addLayout(backup_row)
-        self.backup_note = QLabel('Includes the widgets and their order, pinned apps, style, weather location '
-                                  'and notes.')
+        self.backup_note = QLabel('Includes the widgets and their order, pinned apps, style, AI preferences, '
+                                  'weather location and notes.')
         self.backup_note.setObjectName('sub')
         self.backup_note.setWordWrap(True)
         backup.addWidget(self.backup_note)

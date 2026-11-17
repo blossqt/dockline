@@ -7,9 +7,9 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_WIDGETS = ['start', 'search', 'taskview', 'apps', 'media', 'volume', 'network', 'cpu', 'ram', 'weather', 'tray', 'clock']
+DEFAULT_WIDGETS = ['start', 'search', 'taskview', 'apps', 'media', 'volume', 'network', 'cpu', 'ram', 'ai_limits', 'weather', 'tray', 'clock']
 # widgets added to an existing dock once, when a version brings them (the person can remove them)
-NEW_WIDGETS = {'tray': 'clock', 'taskview': 'apps', 'language': 'clock'}      # widget: put before this one
+NEW_WIDGETS = {'tray': 'clock', 'taskview': 'apps', 'language': 'clock', 'ai_limits': 'weather'}      # widget: put before this one
 ONLY_WITH_TWO_KEYBOARDS = {'language'}      # offered only where Windows has more than one keyboard language
 
 DEFAULTS = {
@@ -27,6 +27,9 @@ DEFAULTS = {
     'app_order': [],            # the apps' order as arranged by dragging
     'offered': [],              # new widgets already added once
     'glass_opacity': 18,        # the Glass style's tint, in percent: lower is clearer
+    'ai_show_used': False,      # False: percent left; True: percent used
+    'ai_warn_low': True,        # show the dock briefly when an active AI window drops to 15% left
+    'ai_pair': ['claude', 'chatgpt'],   # preferred two plans on the combined AI Limits tile
     'notes': '',
     'city': '',
     'latitude': None,

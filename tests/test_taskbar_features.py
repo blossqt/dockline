@@ -474,5 +474,164 @@ class WindowsTests(unittest.TestCase):
             win.user32.IsZoomed = real_zoomed
 
 
+class AIUsageTests(Temp):
+    def test_parsers_and_reset_timers(self):
+        import json
+        import time
+        from dockline import ai
+
+        now = 1_800_000_000.0
+        claude = ai.parse_claude_usage({
+            'five_hour': {'utilization': 37.0, 'resets_at': '2027-01-15T06:00:00+00:00'},
+            'seven_day': {'utilization': 12.0, 'resets_at': '2027-01-20T00:00:00Z'},
+            'seven_day_sonnet': {'utilization': 5.0, 'resets_at': '2027-01-20T00:00:00Z'},
+            'seven_day_opus': None,
+        })
+        self.assertEqual([w['label'] for w in claude], ['Session', 'Weekly', 'Sonnet'])
+        self.assertEqual(ai.shown_value(claude[0], show_used=False, now=claude[0]['resets_at'] - 3600)[:1], (63,))
+        self.assertEqual(ai.shown_value(claude[0], show_used=True, now=claude[0]['resets_at'] - 3600)[:1], (37,))
+        # once the reset timestamp has passed, remaining allowance returns to 100%
+        self.assertEqual(ai.shown_value(claude[0], show_used=False, now=claude[0]['resets_at'] + 5)[:1], (100,))
+
+        self.assertEqual(ai.format_reset(now + 42 * 60, now=now), '42m')
+        self.assertEqual(ai.format_reset(now + 2 * 3600 + 14 * 60, now=now), '2h 14m')
+        self.assertEqual(ai.format_reset(now - 5, now=now), 'now')
+
+        chatgpt, plan = ai.parse_chatgpt_usage({
+            'plan_type': 'plus',
+            'rate_limit': {
+                'primary_window': {'used_percent': 25, 'reset_after_seconds': 5400},
+                'secondary_window': {'used_percent': 40, 'reset_at': now + 3 * 86400},
+            },
+        }, now=now)
+        self.assertEqual(plan, 'Plus')
+        self.assertEqual([(w['label'], w['used']) for w in chatgpt], [('Session', 25.0), ('Weekly', 40.0)])
+
+        gemini = ai.parse_gemini_quota({
+            'buckets': [
+                {'modelId': 'gemini-2.5-pro', 'remainingFraction': 0.82, 'resetTime': '2027-01-15T12:00:00Z'},
+                {'modelId': 'gemini-3-pro', 'remainingFraction': 0.64, 'resetTime': '2027-01-15T12:00:00Z'},
+                {'modelId': 'gemini-2.5-flash', 'remainingFraction': 0.91, 'resetTime': '2027-01-15T12:00:00Z'},
+            ],
+        })
+        self.assertEqual([(w['label'], w['used']) for w in gemini], [('Pro', 36.0), ('Flash', 9.0)])
+
+        sessions = self.folder / '.codex' / 'sessions' / '2026' / '11' / '17'
+        sessions.mkdir(parents=True)
+        rollout = sessions / 'rollout-1.jsonl'
+        rollout.write_text(json.dumps({
+            'timestamp': now,
+            'type': 'event_msg',
+            'payload': {
+                'type': 'token_count',
+                'rate_limits': {
+                    'plan_type': 'pro',
+                    'primary': {'used_percent': 19.0, 'resets_at': now + 7200},
+                    'secondary': {'used_percent': 8.0, 'resets_at': now + 200000},
+                },
+            },
+        }) + '\n', 'utf-8')
+        local_wins, local_plan, _ = ai.latest_codex_session_limits(self.folder / '.codex' / 'sessions')
+        self.assertEqual(local_plan, 'Pro')
+        self.assertEqual(local_wins[0]['used'], 19.0)
+
+    def test_fetch_cache_rate_limit_backoff_and_low_warning(self):
+        import json
+        import time
+        from dockline import ai
+
+        home = self.folder / 'home'
+        (home / '.claude').mkdir(parents=True)
+        secret_token = 'sk-ant-oat01-super-secret-never-persisted'
+        (home / '.claude' / '.credentials.json').write_text(json.dumps({
+            'claudeAiOauth': {'accessToken': secret_token, 'subscriptionType': 'max'}
+        }), 'utf-8')
+        (home / '.gemini').mkdir(parents=True)
+        (home / '.gemini' / 'oauth_creds.json').write_text(json.dumps({
+            'access_token': 'ya29.secret-gemini-token'
+        }), 'utf-8')
+
+        reset_future = time.time() + 3600
+
+        def fake_opener(url, method='GET', headers=None, body=None, timeout=8):
+            if 'anthropic.com' in url:
+                return {'five_hour': {'utilization': 88.0, 'resets_at': reset_future},
+                        'seven_day': {'utilization': 45.0, 'resets_at': reset_future + 86400}}
+            if 'retrieveUserQuota' in url:
+                return {'buckets': [{'modelId': 'gemini-2.5-pro', 'remainingFraction': 0.75,
+                                     'resetTime': reset_future}]}
+            return {}
+
+        cfg = Config(None)
+        coord = ai.AIUsage(cfg, testing=False, home=home, opener=fake_opener)
+        alerts = []
+        coord.low_allowance.connect(lambda p, lbl, left: alerts.append((p, lbl, round(left))))
+        snap = coord.refresh_sync()
+
+        self.assertTrue(snap['claude']['connected'])
+        self.assertTrue(snap['gemini']['connected'])
+        self.assertFalse(snap['chatgpt']['connected'])
+        # Claude is at 88% used -> 12% left (<= 15%), so low_allowance fires once for this window
+        self.assertEqual(alerts, [('Claude', 'Session', 12)])
+        coord.refresh_sync()
+        self.assertEqual(alerts, [('Claude', 'Session', 12)])     # never repeated for the same reset window
+
+        # Cache file keeps usage numbers for fast startup, never any secret token
+        cached_raw = coord.cache_path().read_text('utf-8')
+        self.assertNotIn(secret_token, cached_raw)
+        self.assertNotIn('ya29.', cached_raw)
+        self.assertIn('"claude"', cached_raw)
+
+        # HTTP 429 keeps the last good reading instead of blanking the dock tile
+        def throttled_opener(url, method='GET', headers=None, body=None, timeout=8):
+            raise ai._RateLimited()
+
+        coord.opener = throttled_opener
+        snap_after_429 = coord.refresh_sync(force=True)
+        self.assertTrue(snap_after_429['claude']['connected'])
+        self.assertEqual(snap_after_429['claude']['windows'][0]['used'], 88.0)
+
+    def test_ai_tiles_single_provider_fallback_and_cards(self):
+        import time
+        from dockline.dock import Dock
+
+        cfg = Config(None)
+        cfg['widgets'] = ['ai_limits', 'claude', 'chatgpt', 'gemini']
+        dock = Dock(cfg, testing=True)
+        ai_tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+
+        # With sample_snapshot (3 connected), AI Limits shows preferred pair (Claude + ChatGPT)
+        rows = ai_tile.chosen_rows(ai_tile.snapshot())
+        self.assertEqual([r[1] for r in rows], ['Claude', 'ChatGPT'])
+
+        # When only one provider is signed in, AI Limits fills both rows with its Session & Weekly windows
+        single_snap = {
+            'claude': {
+                'connected': True, 'signed_in': True, 'plan': 'Pro',
+                'windows': [
+                    {'key': 'session', 'label': 'Session', 'used': 20.0, 'resets_at': time.time() + 3600},
+                    {'key': 'weekly', 'label': 'Weekly', 'used': 50.0, 'resets_at': time.time() + 86400},
+                ],
+                'updated_at': time.time(), 'error': '',
+            },
+            'chatgpt': {'connected': False, 'signed_in': False, 'plan': '', 'windows': [], 'updated_at': None, 'error': ''},
+            'gemini': {'connected': False, 'signed_in': False, 'plan': '', 'windows': [], 'updated_at': None, 'error': ''},
+        }
+        rows_single = ai_tile.chosen_rows(single_snap)
+        self.assertEqual([r[1] for r in rows_single], ['Session', 'Weekly'])
+
+        # Every AI tile opens a card cleanly and updates Remaining/Used mode live
+        ai_tiles = [t for t in dock.tiles if t.ID in ('ai_limits', 'claude', 'chatgpt', 'gemini')]
+        self.assertEqual(len(ai_tiles), 4)
+        for tile in ai_tiles:
+            tile.click(tile.rect().center())
+            self.assertIsNotNone(tile.card, tile.ID)
+            tile.set_show_used(True)
+            self.assertTrue(dock.cfg['ai_show_used'])
+            tile.set_show_used(False)
+            tile.card.close()
+        dock.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()

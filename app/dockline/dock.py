@@ -18,6 +18,7 @@ from . import motion
 from . import suitetheme as theme
 from . import uia, win
 from .taskbar import Taskbar
+from .ai import AIUsage
 from .weather import Weather
 from .config import NEW_WIDGETS, ONLY_WITH_TWO_KEYBOARDS
 from .widgets import REGISTRY
@@ -111,6 +112,8 @@ class Dock(QWidget):
         self.appbar: win.AppBar | None = None
         self.taskbar = Taskbar(cfg)
         self.weather = Weather()
+        self.ai = AIUsage(cfg, testing=testing)
+        self.ai.low_allowance.connect(self._on_low_allowance)
         self.tiles = []
         self.picker = None
         self.settings_window = None
@@ -490,6 +493,14 @@ class Dock(QWidget):
             apps.window_changed()
         elif code in (win.HSHELL_WINDOWCREATED, win.HSHELL_WINDOWDESTROYED, win.HSHELL_REDRAW):
             apps.window_changed()
+
+    def _on_low_allowance(self, _provider: str, _label: str, _left: float) -> None:
+        """An active AI allowance dropped to 15% left or less: bring a tucked dock out briefly."""
+        if self.main and self.tucked and not self.full_screen and not self.testing:
+            self.place()
+            self.tucked = False
+            self.away_since = time.monotonic() + 4.0
+            self.slide(True)
 
     def come_back(self) -> None:
         """Dockline was started again: whatever happened, the dock shows."""
@@ -934,7 +945,7 @@ class Dock(QWidget):
 
     def settings_imported(self) -> None:
         """Settings were taken from an export: everything they cover, applied now."""
-        for what in ('look', 'edge', 'opacity', 'clock', 'weather', 'autohide', 'taskbar', 'startup'):
+        for what in ('look', 'edge', 'opacity', 'clock', 'ai', 'weather', 'autohide', 'taskbar', 'startup'):
             self.changed(what)
         for tile in self.tiles:
             if tile.ID == 'apps':
@@ -957,7 +968,7 @@ class Dock(QWidget):
             self.update()
             for tile in self.tiles:
                 tile.update()
-        elif what == 'clock':
+        elif what in ('clock', 'ai'):
             for tile in self.tiles:
                 tile.update()
         elif what == 'weather':

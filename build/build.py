@@ -115,7 +115,7 @@ def main() -> int:
         return 3
 
     step('import check')
-    check = subprocess.run([sys.executable, '-c', 'import dockline.app, dockline.dock, dockline.widgets, '
+    check = subprocess.run([sys.executable, '-c', 'import dockline.app, dockline.dock, dockline.widgets, dockline.ai, '
                             'dockline.picker, dockline.settings_window'], cwd=APP,
                            env={**os.environ, 'QT_QPA_PLATFORM': 'offscreen'})
     if check.returncode:

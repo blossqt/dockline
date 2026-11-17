@@ -99,6 +99,7 @@ G = {
     'rain': '', 'snow': '', 'storm': '', 'focus': '', 'calendar': '',
 }
 G['chevron_up'] = ''           # the tray's "show hidden icons"
+G['refresh'] = '\ue72c'         # refresh AI limits
 
 
 def chip(look) -> QColor:
