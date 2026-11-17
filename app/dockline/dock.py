@@ -932,6 +932,15 @@ class Dock(QWidget):
                 other.changed_here(what)
         self.changed_here(what)
 
+    def settings_imported(self) -> None:
+        """Settings were taken from an export: everything they cover, applied now."""
+        for what in ('look', 'edge', 'opacity', 'clock', 'weather', 'autohide', 'taskbar', 'startup'):
+            self.changed(what)
+        for tile in self.tiles:
+            if tile.ID == 'apps':
+                tile.order = list(self.cfg['app_order'])
+                tile.refresh()
+
     def changed_here(self, what: str) -> None:
         if what == 'autohide':
             self.tucked = False

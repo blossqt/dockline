@@ -663,3 +663,47 @@ def framed_look(hwnd: int, dark: bool, blur: bool) -> None:
         dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
         kind = ctypes.c_int(3)                                               # DWMSBT_TRANSIENTWINDOW: acrylic
         dwmapi.DwmSetWindowAttribute(hwnd, 38, ctypes.byref(kind), 4)       # DWMWA_SYSTEMBACKDROP_TYPE
+
+
+# ---------------------------------------------------------------- a program's own name
+
+_version = ctypes.WinDLL('version')
+_version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+_version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+_version.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p),
+                                    ctypes.POINTER(wintypes.UINT)]
+_descriptions: dict[str, str] = {}
+
+
+def program_name(path: str) -> str:
+    """A program's name as it gives it (its file description: 'Steam', 'Microsoft Edge'), or its file
+    name's stem."""
+    if path in _descriptions:
+        return _descriptions[path]
+    name = ''
+    try:
+        size = _version.GetFileVersionInfoSizeW(path, None)
+        if size:
+            data = ctypes.create_string_buffer(size)
+            if _version.GetFileVersionInfoW(path, 0, size, data):
+                pointer, length = ctypes.c_void_p(), wintypes.UINT()
+                languages = []
+                if _version.VerQueryValueW(data, r'\VarFileInfo\Translation', ctypes.byref(pointer),
+                                           ctypes.byref(length)) and length.value >= 4:
+                    words = (ctypes.c_ushort * (length.value // 2)).from_address(pointer.value)
+                    languages = [f'{words[i]:04x}{words[i + 1]:04x}' for i in range(0, len(words) - 1, 2)]
+                for language in languages + ['040904b0', '040904e4']:
+                    if _version.VerQueryValueW(data, '\\StringFileInfo\\' + language + '\\FileDescription',
+                                               ctypes.byref(pointer), ctypes.byref(length)) and length.value > 1:
+                        name = ctypes.wstring_at(pointer.value, length.value - 1).strip()
+                        if name:
+                            break
+    except OSError:
+        name = ''
+    if not name:
+        stem = os.path.splitext(os.path.basename(path))[0]
+        name = stem[:1].upper() + stem[1:]
+    if len(_descriptions) > 256:
+        _descriptions.clear()
+    _descriptions[path] = name
+    return name

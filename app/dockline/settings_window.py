@@ -190,6 +190,23 @@ class SettingsWindow(QWidget):
         displays.setWordWrap(True)
         system.addWidget(displays)
 
+        backup = self.section(layout, 'Backup')
+        backup_row = QHBoxLayout()
+        backup_row.setSpacing(8)
+        for words, slot in (('Export settings', self.export_settings), ('Import settings', self.import_settings)):
+            button = QPushButton(words)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(slot)
+            backup_row.addWidget(button)
+        backup_row.addStretch(1)
+        backup.addLayout(backup_row)
+        self.backup_note = QLabel('Includes the widgets and their order, pinned apps, style, weather location '
+                                  'and notes.')
+        self.backup_note.setObjectName('sub')
+        self.backup_note.setWordWrap(True)
+        backup.addWidget(self.backup_note)
+
         about = self.section(layout, 'About')
         version = QLabel(f'Dockline {__version__}')
         about.addWidget(version)
@@ -206,6 +223,38 @@ class SettingsWindow(QWidget):
         note.setWordWrap(True)
         about.addWidget(note)
         layout.addStretch(1)
+
+    def export_settings(self) -> None:
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog
+        from .config import export_settings
+        path, _ = QFileDialog.getSaveFileName(self, 'Export settings', str(Path.home() / 'Documents' /
+                                                                           'Dockline settings.json'),
+                                              'Dockline settings (*.json)')
+        if not path:
+            return
+        try:
+            export_settings(self.cfg, Path(path))
+            self.backup_note.setText(f'Settings exported to {path}.')
+        except OSError as error:
+            self.backup_note.setText(f'The settings could not be exported ({error.strerror or error}). '
+                                     'Choose another folder and try again.')
+
+    def import_settings(self) -> None:
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog
+        from .config import ImportError_, import_settings
+        path, _ = QFileDialog.getOpenFileName(self, 'Import settings', str(Path.home() / 'Documents'),
+                                              'Dockline settings (*.json)')
+        if not path:
+            return
+        try:
+            import_settings(self.cfg, Path(path))
+        except ImportError_ as error:
+            self.backup_note.setText(str(error))
+            return
+        self.dock.settings_imported()
+        QTimer.singleShot(0, self.reopen)                # the window shows the imported settings
 
     def section(self, layout: QVBoxLayout, title: str) -> QVBoxLayout:
         heading = QLabel(title)

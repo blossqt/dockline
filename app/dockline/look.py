@@ -381,8 +381,7 @@ def settings_css(look: 'Look', opacity: int = 18) -> str:
     QFrame#section {{ background: {panel[0]}; border: 1px solid {panel[1]}; border-radius: 12px; }}
     QFrame#choice {{ background: {panel[0]}; border: 1px solid {panel[1]}; border-radius: 12px; }}
     QFrame#choice:hover {{ border-color: {sub}; }}
-    QFrame#choice[on="true"] {{ background: {PINK}; border-color: {PINK}; }}
-    QFrame#choice[on="true"] QLabel {{ color: {ON_PINK}; }}
+    QFrame#choice[on="true"] {{ border-color: {fg}; }}
     QScrollBar:vertical {{ width: 8px; background: transparent; margin: 2px; }}
     QScrollBar::handle:vertical {{ background: {line}; border-radius: 3px; min-height: 32px; }}
     QScrollBar::handle:vertical:hover {{ background: {sub}; }}

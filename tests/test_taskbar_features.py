@@ -14,7 +14,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'app'))
 
 from PySide6.QtCore import QMimeData, QUrl            # noqa: E402
-from PySide6.QtWidgets import QApplication            # noqa: E402
+from PySide6.QtWidgets import QApplication, QLabel    # noqa: E402
 
 from dockline import shortcuts, win                    # noqa: E402
 from dockline.config import Config                     # noqa: E402
@@ -260,6 +260,77 @@ class DockTests(Temp):
             finally:
                 dock.testing = True
         dock.hide()
+
+    def test_settings_export_and_import(self):
+        from dockline import config
+        source = some_shortcut()
+        kept = shortcuts.keep(str(source))                       # a pin Dockline keeps in its Pins folder
+        cfg = Config(None)
+        cfg['pinned'] = [kept, r'C:\Tools\tool.exe']
+        cfg['widgets'] = ['start', 'apps', 'clock']
+        cfg['look'] = 'midnight'
+        cfg['taskbar_saved'] = 3
+        out = self.folder / 'export.json'
+        config.export_settings(cfg, out)
+        Path(kept).unlink()                                       # a new PC: the Pins folder is empty
+        fresh = Config(None)
+        config.import_settings(fresh, out)
+        self.assertEqual(fresh['widgets'], ['start', 'apps', 'clock'])
+        self.assertEqual(fresh['look'], 'midnight')
+        self.assertIsNone(fresh['taskbar_saved'])                # this PC's own state is never taken
+        self.assertTrue(Path(fresh['pinned'][0]).exists())        # the shortcut was put back
+        self.assertEqual(fresh['pinned'][1], r'C:\Tools\tool.exe')
+        self.assertTrue(fresh['pins_imported'])
+        wrong = self.folder / 'other.json'
+        wrong.write_text('{"look": "black"}', 'utf-8')
+        with self.assertRaises(config.ImportError_):
+            config.import_settings(fresh, wrong)
+
+    def test_previews_sit_low_and_peek(self):
+        from unittest import mock
+        from dockline import previews
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe'),
+                                       win.Window(102, 'Two', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        tile.refresh()
+        dock.layout().activate()
+        panel = previews.Previews(tile)
+        peeks = []
+        with mock.patch.object(previews, 'peek', lambda on, hwnd=0, keep=0: peeks.append((on, hwnd))):
+            panel.show_for(0)
+            self.assertEqual(panel.y() + panel.height(), dock.mapToGlobal(dock.rect().topLeft()).y() - previews.ABOVE)
+            panel.hover = 1
+            panel.start_peek()                                    # resting on the second window's preview
+            self.assertEqual(peeks[-1], (True, 102))
+            panel.close_now()
+            self.assertEqual(peeks[-1], (False, 0))
+        dock.hide()
+
+    def test_media_progress_and_jump(self):
+        dock = self.make()
+        dock.cfg['widgets'] = ['media']
+        dock.rebuild()
+        tile = next(t for t in dock.tiles if t.ID == 'media')
+        tile.click(tile.rect().center())
+        page = tile.carousel.pages[0]
+        self.assertTrue(page.progress.isVisibleTo(page))
+        self.assertTrue(page.progress.seekable())
+        page.seek(100.0)                                          # testing: shown, nothing sent
+        self.assertAlmostEqual(tile.carousel.pages[0].session.position, 100.0)
+        self.assertFalse(tile.carousel.pages[1].progress.isVisibleTo(tile.carousel.pages[1]))   # no length given
+        tile.card.close()
+
+    def test_sound_card_lists_apps(self):
+        dock = self.make()
+        dock.cfg['widgets'] = ['volume']
+        dock.rebuild()
+        tile = next(t for t in dock.tiles if t.ID == 'volume')
+        rows = tile.app_rows()
+        names = [label.text() for label in rows.findChildren(QLabel)]
+        self.assertIn('System sounds', names)
+        self.assertIn('Music', names)
 
     def test_language_tile_draws(self):
         dock = self.make()

@@ -53,6 +53,29 @@ class _Choice(QFrame):
             self.set_on(not self.on)
             self.toggled(self.key, self.on)
 
+    BADGE = 22
+
+    def paintEvent(self, event):
+        """On the dock: the card as any other, its outline drawn in the chosen colour and a round
+        check in its corner (a whole card in black among pale ones was jarring)."""
+        super().paintEvent(event)
+        if not self.on:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        fill = QColor(self.palette().color(self.foregroundRole()))
+        badge = QRectF(self.width() - self.BADGE - 12, 12, self.BADGE, self.BADGE)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(fill)
+        painter.drawEllipse(badge)
+        mark = QColor('#111114') if fill.lightness() > 128 else QColor('#fafafa')
+        from PySide6.QtGui import QPen
+        from PySide6.QtCore import QPointF
+        painter.setPen(QPen(mark, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        x, y, side = badge.x(), badge.y(), badge.width()
+        painter.drawPolyline([QPointF(x + side * 0.28, y + side * 0.52), QPointF(x + side * 0.44, y + side * 0.67),
+                              QPointF(x + side * 0.73, y + side * 0.36)])
+
 
 class Picker(QWidget):
     def __init__(self, dock, embedded: bool = False):

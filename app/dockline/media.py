@@ -33,6 +33,16 @@ class Session:
     can_previous: bool = False
     can_next: bool = False
     art: bytes = b''             # the album art or video thumbnail, as an image file's bytes
+    position: float = 0.0        # seconds into it, when last told (at stamp)
+    duration: float = 0.0        # its length in seconds; 0 when the app gives none
+    stamp: float = 0.0           # when position was right (time.time())
+    can_seek: bool = False
+
+    def now(self) -> float:
+        """Where it is now: while it plays, on from where it was last told."""
+        import time
+        moved = max(0.0, time.time() - self.stamp) if self.playing and self.stamp else 0.0
+        return max(0.0, min(self.duration or 1e9, self.position + moved))
 
 
 # ---------------------------------------------------------------- app names
@@ -151,11 +161,14 @@ class Media(QObject):
                 if len(self._art) > 32:
                     self._art.clear()
                 self._art[(app_id, title)] = art
+            position, duration, stamp = _timeline(session)
             found.append(Session(app_id, app_name(app_id), title, artist,
                                  info.playback_status == _Status.PLAYING,
                                  bool(controls.is_play_pause_toggle_enabled or controls.is_play_enabled
                                       or controls.is_pause_enabled),
-                                 bool(controls.is_previous_enabled), bool(controls.is_next_enabled), art))
+                                 bool(controls.is_previous_enabled), bool(controls.is_next_enabled), art,
+                                 position, duration, stamp,
+                                 bool(controls.is_playback_position_enabled) and duration > 0))
         found.sort(key=lambda s: not s.playing)              # what plays first, as Android's player
         return found
 
@@ -174,13 +187,21 @@ class Media(QObject):
         except Exception:
             return b''
 
-    async def _command(self, session_id: str, what: str) -> None:
+    def seek(self, session_id: str, seconds: float) -> None:
+        """Jump to a point in one app's track or video."""
+        if self.loop is not None:
+            asyncio.run_coroutine_threadsafe(self._command(session_id, 'seek', seconds), self.loop)
+
+    async def _command(self, session_id: str, what: str, seconds: float = 0.0) -> None:
         if self.manager is None:
             return
         for session in list(self.manager.get_sessions()):
             if (session.source_app_user_model_id or '') == session_id:
                 try:
-                    if what == 'toggle':
+                    if what == 'seek':
+                        start = session.get_timeline_properties().start_time.total_seconds()
+                        await session.try_change_playback_position_async(round((start + seconds) * 10_000_000))
+                    elif what == 'toggle':
                         await session.try_toggle_play_pause_async()
                     elif what == 'next':
                         await session.try_skip_next_async()
@@ -191,6 +212,25 @@ class Media(QObject):
                 break
         await asyncio.sleep(0.15)
         self._wake.set()
+
+
+def _timeline(session) -> tuple[float, float, float]:
+    """(seconds in, length in seconds, when that was so) from a session's timeline."""
+    import time
+    try:
+        line = session.get_timeline_properties()
+        start = line.start_time.total_seconds()
+        duration = max(0.0, line.end_time.total_seconds() - start)
+        position = max(0.0, line.position.total_seconds() - start)
+        try:
+            stamp = line.last_updated_time.timestamp()
+        except (OverflowError, OSError, ValueError, AttributeError):
+            stamp = 0.0
+        if not stamp or stamp < 946684800 or stamp > time.time() + 5:      # unset (1601) or nonsense
+            stamp = time.time()
+        return position, duration, stamp
+    except Exception:
+        return 0.0, 0.0, 0.0
 
 
 _media: Media | None = None

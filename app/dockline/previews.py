@@ -1,6 +1,10 @@
-"""Live window previews above an app, as the Windows taskbar shows them on hover: Windows itself
-(DWM) draws each window's live picture into the panel; click one to switch to it, or its close
-button to close it."""
+"""Live window previews above an app, as the Windows taskbar shows them on hover (or on a click on
+an app with several windows): Windows itself (DWM) draws each window's live picture into the panel.
+Resting on one shows that window alone on the screen, the others faded, with Windows' own peek
+(the taskbar's); click it to switch to it, or its close button to close it.
+
+Windows' own preview pop-up can't be used: it belongs to the taskbar, which Dockline hides. Its
+two parts are what this uses - DWM's live thumbnails, and DWM's live preview (the peek)."""
 
 from __future__ import annotations
 
@@ -28,8 +32,29 @@ dwmapi.DwmUpdateThumbnailProperties.argtypes = [ctypes.c_void_p, ctypes.POINTER(
 dwmapi.DwmQueryThumbnailSourceSize.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.SIZE)]
 RECT_DESTINATION, OPACITY, VISIBLE, CLIENT_ONLY = 0x1, 0x4, 0x8, 0x10
 
+# The taskbar's peek: DwmpActivateLivePreview, exported by number only (113) - (on, the window to show,
+# the window kept on top of the fade, 1 = a window's peek, reserved)
+try:
+    _live_preview = dwmapi[113]
+    _live_preview.argtypes = [wintypes.UINT, wintypes.HWND, wintypes.HWND, wintypes.UINT, ctypes.c_void_p]
+    _live_preview.restype = ctypes.c_long
+except (AttributeError, OSError):              # pragma: no cover - a Windows without it
+    _live_preview = None
+
+
+def peek(on: bool, hwnd: int = 0, keep: int = 0) -> None:
+    """Show one window alone on the screen (on), or end that."""
+    if _live_preview is None:
+        return
+    try:
+        _live_preview(1 if on else 0, wintypes.HWND(hwnd or None), wintypes.HWND(keep or None), 1, None)
+    except OSError:
+        pass
+
 BOX_W, BOX_H, TITLE_H, PAD, GAP = 216, 150, 28, 10, 8
 MOST = 6
+ABOVE = 8               # between the dock and the panel, as the taskbar's (the icons shrink back meanwhile)
+PEEK_AFTER = 400        # ms resting on a preview before its window is shown alone
 
 
 class Previews(QWidget):
@@ -50,6 +75,11 @@ class Previews(QWidget):
         self.hide_soon.setSingleShot(True)
         self.hide_soon.setInterval(350)
         self.hide_soon.timeout.connect(self.close_now)
+        self.peeking = 0                          # the window shown alone now, if any
+        self.peek_soon = QTimer(self)
+        self.peek_soon.setSingleShot(True)
+        self.peek_soon.setInterval(PEEK_AFTER)
+        self.peek_soon.timeout.connect(self.start_peek)
 
     # -- showing
     def show_for(self, index: int) -> None:
@@ -72,10 +102,9 @@ class Previews(QWidget):
         centre = self.strip.mapToGlobal(QPoint(round(tile.center().x()), 0)).x()
         dock = self.strip.dock
         screen = dock.screen().geometry()
-        rise = round(dock.tile_height * 0.95) + 10          # clear of the magnified icon
         x = max(screen.left() + 8, min(centre - width // 2, screen.right() - width - 8))
         top = dock.mapToGlobal(QPoint(0, 0)).y()
-        y = top + dock.height() + rise if dock.edge == 'top' else top - rise - height
+        y = top + dock.height() + ABOVE if dock.edge == 'top' else top - ABOVE - height
         self.setGeometry(x, y, width, height)
         self.show()
         win.round_corners(int(self.winId()), True)
@@ -116,7 +145,19 @@ class Previews(QWidget):
                 dwmapi.DwmUnregisterThumbnail(thumb)
         self.thumbs = []
 
+    def start_peek(self) -> None:
+        if 0 <= self.hover < len(self.windows) and self.isVisible():
+            self.peeking = self.windows[self.hover].hwnd
+            peek(True, self.peeking, int(self.winId()))
+
+    def end_peek(self) -> None:
+        self.peek_soon.stop()
+        if self.peeking:
+            self.peeking = 0
+            peek(False)
+
     def close_now(self) -> None:
+        self.end_peek()
         self.drop_thumbs()
         self.index = -1
         self.windows = []
@@ -171,6 +212,7 @@ class Previews(QWidget):
 
     def leaveEvent(self, _):
         self.hover = -1
+        self.end_peek()
         self.update()
         self.leave_soon()
 
@@ -179,6 +221,16 @@ class Previews(QWidget):
         if index != self.hover:
             self.hover = index
             self.update()
+            if self.peeking:                               # already peeking: the next window at once
+                self.peeking = 0
+                if index >= 0:
+                    self.start_peek()
+                else:
+                    peek(False)
+            else:
+                self.peek_soon.stop()
+                if index >= 0:
+                    self.peek_soon.start()
 
     def mouseReleaseEvent(self, event):
         pos = event.position()
@@ -187,6 +239,7 @@ class Previews(QWidget):
             return
         window = self.windows[index]
         if event.button() == Qt.MiddleButton or self.close_box(index).contains(pos):
+            self.end_peek()
             win.close(window.hwnd)                           # as the taskbar's preview does
             QTimer.singleShot(250, self.strip.refresh)
             QTimer.singleShot(300, lambda: self.show_for(self.index) if self.isVisible() else None)

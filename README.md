@@ -11,7 +11,10 @@ What it does in the taskbar's place:
   open windows, grouped by program; a program's windows show on its pinned shortcut.
 - Search opens Windows search. Media is one button: its card has a page per app playing sound,
   with art, title and controls, turned with the scroll wheel, as Android's media player.
-- Previews on hover, attention flashing, middle-click or Shift+click for a new window, End task.
+- Volume per app in the Sound card; a draggable progress bar on each media page.
+- Settings > Backup exports and imports every setting, pinned shortcuts included.
+- Previews on hover (and on a click on an app with several windows), close above the dock; resting on
+  one shows that window alone (Windows' own live preview). Attention flashing, middle-click or Shift+click for a new window, End task.
 - Files dragged onto an app open in it; held over an open app, its window comes forward. Programs
   and shortcuts dragged onto the dock are pinned. A hidden dock comes up for a file drag.
 - The input language of the window in front, with the input mode of Chinese, Japanese and Korean

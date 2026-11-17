@@ -359,3 +359,145 @@ def mute_output(muted: bool) -> None:
             _release(endpoint)
     finally:
         _release(enumerator)
+
+
+# --------------------------------------------------------------------------- each app's volume
+
+IID_IAudioSessionManager2 = GUID.of('77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F')
+IID_IAudioSessionControl2 = GUID.of('BFB7FF88-7239-4FC9-8FA2-07C950BE9C6D')
+IID_ISimpleAudioVolume = GUID.of('87CE5498-68D6-44E5-9215-6DA47EF883D8')
+SESSION_EXPIRED = 2
+
+
+@dataclass(frozen=True)
+class AppVolume:
+    """An app's sound on the output, as Windows' Volume mixer lists it: one row per program,
+    however many sessions it has (a browser has several)."""
+    key: str                     # the program's path, lower case ('' for system sounds)
+    pid: int                     # one of its processes
+    name: str                    # its name as the session gives it, or '' (then the program's)
+    volume: int                  # 0-100
+    muted: bool
+    system: bool = False
+
+
+def _query(obj: ctypes.c_void_p, iid: GUID) -> ctypes.c_void_p | None:
+    found = ctypes.c_void_p()
+    try:
+        _call(obj, 0, ctypes.byref(iid), ctypes.byref(found), argtypes=(ctypes.c_void_p, ctypes.c_void_p))
+    except OSError:
+        return None
+    return found if found else None
+
+
+def _sessions(each) -> None:
+    """Call each(control2, simple_volume) for every live session on the default output."""
+    enumerator = _create(CLSID_MMDeviceEnumerator, IID_IMMDeviceEnumerator)
+    try:
+        device = ctypes.c_void_p()
+        try:
+            _call(enumerator, 4, E_RENDER, 1, ctypes.byref(device),
+                  argtypes=(ctypes.c_int, ctypes.c_int, ctypes.c_void_p))                # GetDefaultAudioEndpoint
+        except OSError:
+            return
+        try:
+            manager = ctypes.c_void_p()
+            _call(device, 3, ctypes.byref(IID_IAudioSessionManager2), CLSCTX_ALL, None, ctypes.byref(manager),
+                  argtypes=(ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, ctypes.c_void_p))   # Activate
+            try:
+                listing = ctypes.c_void_p()
+                _call(manager, 5, ctypes.byref(listing), argtypes=(ctypes.c_void_p,))   # GetSessionEnumerator
+                try:
+                    count = ctypes.c_int()
+                    _call(listing, 3, ctypes.byref(count), argtypes=(ctypes.c_void_p,))  # GetCount
+                    for index in range(count.value):
+                        control = ctypes.c_void_p()
+                        _call(listing, 4, index, ctypes.byref(control),
+                              argtypes=(ctypes.c_int, ctypes.c_void_p))                   # GetSession
+                        try:
+                            state = ctypes.c_int()
+                            _call(control, 3, ctypes.byref(state), argtypes=(ctypes.c_void_p,))   # GetState
+                            if state.value == SESSION_EXPIRED:
+                                continue
+                            second = _query(control, IID_IAudioSessionControl2)
+                            simple = _query(control, IID_ISimpleAudioVolume)
+                            try:
+                                if second is not None and simple is not None:
+                                    each(second, simple)
+                            finally:
+                                _release(second)
+                                _release(simple)
+                        finally:
+                            _release(control)
+                finally:
+                    _release(listing)
+            finally:
+                _release(manager)
+        finally:
+            _release(device)
+    finally:
+        _release(enumerator)
+
+
+def _session_facts(second: ctypes.c_void_p, simple: ctypes.c_void_p) -> tuple[int, str, bool, float, bool]:
+    pid = wintypes.DWORD()
+    _call(second, 14, ctypes.byref(pid), argtypes=(ctypes.c_void_p,))                       # GetProcessId
+    system = _call(second, 15, restype=ctypes.c_long) == 0                                  # IsSystemSoundsSession: S_OK
+    text = ctypes.c_void_p()
+    name = ''
+    try:
+        _call(second, 4, ctypes.byref(text), argtypes=(ctypes.c_void_p,))                    # GetDisplayName
+        if text.value:
+            name = ctypes.wstring_at(text.value)
+            ole32.CoTaskMemFree(text)
+    except OSError:
+        pass
+    level = ctypes.c_float()
+    _call(simple, 4, ctypes.byref(level), argtypes=(ctypes.c_void_p,))                      # GetMasterVolume
+    muted = wintypes.BOOL()
+    _call(simple, 6, ctypes.byref(muted), argtypes=(ctypes.c_void_p,))                      # GetMute
+    return pid.value, name, system, level.value, bool(muted.value)
+
+
+def app_volumes(path_of=None) -> list[AppVolume]:
+    """The apps with sound on the default output (system sounds first), one row per program."""
+    import os
+    if path_of is None:
+        from .win import process_path as path_of
+    rows: dict[str, AppVolume] = {}
+
+    def each(second, simple):
+        pid, name, system, level, muted = _session_facts(second, simple)
+        if pid == os.getpid():
+            return
+        key = '' if system else (path_of(pid) or f'pid:{pid}').lower()
+        if key in rows:
+            return                                      # the program's first session speaks for it
+        rows[key] = AppVolume(key, pid, '' if name.startswith('@') else name, round(level * 100), muted, system)
+
+    try:
+        _sessions(each)
+    except OSError:
+        return []
+    return sorted(rows.values(), key=lambda row: (not row.system, (row.name or row.key).lower()))
+
+
+def set_app_volume(key: str, percent: int | None = None, muted: bool | None = None, path_of=None) -> None:
+    """Set one program's volume (0-100) and/or mute, on every session it has, as the mixer does."""
+    import os
+    if path_of is None:
+        from .win import process_path as path_of
+
+    def each(second, simple):
+        pid, _name, system, _level, _muted = _session_facts(second, simple)
+        if pid == os.getpid():
+            return
+        if ('' if system else (path_of(pid) or f'pid:{pid}').lower()) != key:
+            return
+        if percent is not None:
+            _call(simple, 3, max(0.0, min(1.0, percent / 100)), None,
+                  argtypes=(ctypes.c_float, ctypes.c_void_p))                                # SetMasterVolume
+        if muted is not None:
+            _call(simple, 5, bool(muted), None, argtypes=(wintypes.BOOL, ctypes.c_void_p))   # SetMute
+
+    _sessions(each)

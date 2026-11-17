@@ -11,7 +11,7 @@ import urllib.parse
 import webbrowser
 import winreg
 
-from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
@@ -384,11 +384,13 @@ class AppsTile(Tile):
     def previews_visible(self) -> bool:
         return self._previews is not None and self._previews.isVisible()
 
-    def show_previews(self) -> None:
+    def show_previews(self, index: int | None = None) -> None:
         panel = self.previews()
-        if panel is None or self.dragged is not None or self.card is not None or self.hover_index < 0:
+        index = self.hover_index if index is None else index
+        if panel is None or self.dragged is not None or self.card is not None or index < 0:
             return
-        panel.show_for(self.hover_index)
+        panel.show_for(index)
+        self.follow_pointer(None)                          # the icons shrink back: the panel sits low
 
     def window_changed(self) -> None:
         """Windows told the dock a window opened, closed, came to the front or changed title."""
@@ -616,7 +618,7 @@ class AppsTile(Tile):
         layer = self.magnifier()
         if layer is None:
             return
-        if pos is None or self.dragged is not None or self.dock.editing or self.card is not None:
+        if pos is None or self.dragged is not None or self.dock.editing or self.card is not None                 or self.previews_visible():                   # previews open: the icons rest, under them
             layer.follow(None)
         else:
             layer.follow(pos.x() / (self.slot + self.GAP))
@@ -714,6 +716,9 @@ class AppsTile(Tile):
                 win.minimise(window.hwnd)
             else:
                 win.activate(window.hwnd)
+        elif self.previews() is not None:                 # several: their previews, as on hover
+            self.dwell.stop()
+            self.show_previews(index)
         else:
             self.list_windows(group, index)
         QTimer.singleShot(150, self.refresh)
@@ -1361,11 +1366,100 @@ class _MediaButton(QWidget):
                                            QPointF(left + side * 0.9, middle.y())]))
 
 
+def _minutes(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, rest = divmod(seconds, 3600)
+    return f'{hours}:{rest // 60:02}:{rest % 60:02}' if hours else f'{rest // 60}:{rest % 60:02}'
+
+
+class _MediaProgress(QWidget):
+    """How far into the track or video, with the time gone and its length; dragged or clicked to
+    jump there, where the app allows it."""
+
+    HEIGHT = 30
+
+    def __init__(self, page):
+        super().__init__(page)
+        self.page = page
+        self.dragging: float | None = None             # where it is being dragged to (0..1)
+        self.hover = False
+        self.setFixedHeight(self.HEIGHT)
+        self.setMouseTracking(True)
+
+    def share(self) -> float:
+        session = self.page.session
+        if self.dragging is not None:
+            return self.dragging
+        if not session.duration:
+            return 0.0
+        return max(0.0, min(1.0, session.now() / session.duration))
+
+    def track(self) -> QRectF:
+        return QRectF(4, 6, self.width() - 8, 4)
+
+    def share_at(self, x: float) -> float:
+        line = self.track()
+        return max(0.0, min(1.0, (x - line.left()) / max(1.0, line.width())))
+
+    def seekable(self) -> bool:
+        return self.page.session.can_seek
+
+    def enterEvent(self, _):
+        self.hover = True
+        self.setCursor(Qt.PointingHandCursor if self.seekable() else Qt.ArrowCursor)
+        self.update()
+
+    def leaveEvent(self, _):
+        self.hover = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.seekable():
+            self.dragging = self.share_at(event.position().x())
+            self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.dragging is not None:
+            self.dragging = self.share_at(event.position().x())
+            self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.dragging is None:
+            return
+        share, self.dragging = self.dragging, None
+        self.page.seek(share * self.page.session.duration)
+        self.update()
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        session = self.page.session
+        ink = self.page.ink()
+        track = QColor(ink)
+        track.setAlpha(60)
+        line = self.track()
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(line, 2, 2)
+        share = self.share()
+        painter.setBrush(ink)
+        painter.drawRoundedRect(QRectF(line.left(), line.top(), line.width() * share, line.height()), 2, 2)
+        if self.seekable() and (self.hover or self.dragging is not None):
+            painter.drawEllipse(QPointF(line.left() + line.width() * share, line.center().y()), 6, 6)
+        if session.duration:
+            soft = QColor(ink)
+            soft.setAlpha(170)
+            gone = share * session.duration
+            L.text(painter, QRectF(line.left(), 13, 80, 16), _minutes(gone), soft, 11, 400, Qt.AlignLeft | Qt.AlignVCenter)
+            L.text(painter, QRectF(line.right() - 80, 13, 80, 16), _minutes(session.duration), soft, 11, 400,
+                   Qt.AlignRight | Qt.AlignVCenter)
+
+
 class _MediaPage(QWidget):
     """One app's session, as a card in Android's media player: its art behind, its name, the title
     and artist, and the controls."""
 
-    HEIGHT = 156
+    HEIGHT = 190
 
     def __init__(self, carousel, session):
         super().__init__(carousel)
@@ -1373,6 +1467,7 @@ class _MediaPage(QWidget):
         self.session = None
         self.art = QPixmap()
         self.buttons = {kind: _MediaButton(self, kind, kind == 'toggle') for kind in ('previous', 'toggle', 'next')}
+        self.progress = _MediaProgress(self)
         self.show_session(session)
 
     def show_session(self, session) -> None:
@@ -1381,6 +1476,8 @@ class _MediaPage(QWidget):
             if session.art:
                 self.art.loadFromData(session.art)
         self.session = session
+        self.progress.setVisible(session.duration > 0)
+        self.progress.update()
         self.buttons['previous'].setEnabled(session.can_previous)
         self.buttons['next'].setEnabled(session.can_next)
         self.buttons['toggle'].setEnabled(session.can_toggle)
@@ -1400,7 +1497,11 @@ class _MediaPage(QWidget):
     def pressed(self, kind: str) -> None:
         self.carousel.command(self.session, kind)
 
+    def seek(self, seconds: float) -> None:
+        self.carousel.seek(self.session, seconds)
+
     def resizeEvent(self, _):
+        self.progress.setGeometry(10, 80, self.width() - 20, _MediaProgress.HEIGHT)
         middle, bottom = self.width() / 2, self.height() - 14
         toggle = self.buttons['toggle']
         toggle.move(round(middle - toggle.width() / 2), round(bottom - toggle.height()))
@@ -1457,7 +1558,16 @@ class _MediaCarousel(QWidget):
         self._slide = None
         self._wheel = 0.0
         self.setFixedHeight(_MediaPage.HEIGHT + self.DOTS)
+        self.clock = QTimer(self)                          # the progress bars move while something plays
+        self.clock.setInterval(250)
+        self.clock.timeout.connect(self.tick_progress)
+        self.clock.start()
         self.show_sessions(sessions)
+
+    def tick_progress(self) -> None:
+        for page in self.pages:
+            if page.session.playing and page.session.duration:
+                page.progress.update()
 
     def show_sessions(self, sessions) -> None:
         current = self.pages[self.index].session.id if self.pages else ''
@@ -1544,6 +1654,17 @@ class _MediaCarousel(QWidget):
             painter.setBrush(colour)
             painter.drawEllipse(dot)
 
+    def seek(self, session, seconds: float) -> None:
+        """Jump there; shown at once, the next look confirms it."""
+        from dataclasses import replace
+        import time as clock
+        for page in self.pages:
+            if page.session.id == session.id:
+                page.show_session(replace(page.session, position=seconds, stamp=clock.time()))
+        if not self.tile.dock.testing:
+            from . import media
+            media.media().seek(session.id, seconds)
+
     def command(self, session, kind: str) -> None:
         if self.tile.dock.testing:
             return
@@ -1566,7 +1687,8 @@ class MediaTile(Tile):
         self.carousel = None
         if self.dock.testing:
             from .media import Session
-            self.sessions = [Session('sample.music', 'Music', 'Song title', 'Artist', True, True, True, True),
+            self.sessions = [Session('sample.music', 'Music', 'Song title', 'Artist', True, True, True, True, b'',
+                                     74.0, 213.0, 0.0, True),
                              Session('sample.video', 'Browser', 'Video title', 'Channel', False, True, False, False)]
             return
         from . import media
@@ -1763,7 +1885,93 @@ class VolumeTile(Tile):
         controls.addWidget(_button('Sound settings', lambda: (self.card and self.card.close(),
                                                               _open('ms-settings:sound'))))
         layout.addLayout(controls)
-        self.open_card(content, 320)
+        apps = self.app_rows()
+        if apps is not None:
+            layout.addWidget(apps)
+        self.open_card(content, 340)
+
+    APPS_SHOWN = 5          # rows before the list scrolls
+
+    def app_rows(self) -> QWidget | None:
+        """Each app's volume, as Windows' Volume mixer: its icon and name, mute, and a slider."""
+        rows = audio.app_volumes() if not self.dock.testing else [
+            audio.AppVolume('', 0, '', 60, False, True), audio.AppVolume('c:\\sample\\music.exe', 1, 'Music', 80, False)]
+        if not rows:
+            return None
+        host = QWidget()
+        column = QVBoxLayout(host)
+        column.setContentsMargins(0, 4, 0, 0)
+        column.setSpacing(8)
+        column.addWidget(_label('Apps', 'sub'))
+        holder = QWidget()
+        lines = QVBoxLayout(holder)
+        lines.setContentsMargins(0, 0, 0, 0)
+        lines.setSpacing(6)
+        provider = QFileIconProvider()
+        for row in rows:
+            lines.addLayout(self.app_row(row, provider))
+        if len(rows) > self.APPS_SHOWN:
+            area = QScrollArea()
+            area.setWidgetResizable(True)
+            area.setFrameShape(QScrollArea.NoFrame)
+            area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            area.setStyleSheet('QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }')
+            area.setWidget(holder)
+            area.setFixedHeight(self.APPS_SHOWN * 40)
+            column.addWidget(area)
+        else:
+            column.addWidget(holder)
+        return host
+
+    def app_row(self, row, provider) -> QHBoxLayout:
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        icon = QLabel()
+        icon.setFixedSize(22, 22)
+        if row.system:
+            icon.setText(L.G['volume'])
+            icon.setStyleSheet(f"font-family: '{L.icon_family()}'; font-size: 15px;")
+            icon.setAlignment(Qt.AlignCenter)
+        elif row.key and not row.key.startswith('pid:'):
+            icon.setPixmap(provider.icon(QFileInfo(row.key)).pixmap(QSize(20, 20), self.devicePixelRatioF()))
+        name = 'System sounds' if row.system else (row.name or win.program_name(row.key))
+        label = QLabel(name)
+        label.setFixedWidth(96)
+        label.setToolTip(name)
+        mute = _button(L.G['mute'] if row.muted else L.G['volume'], name='icon', checkable=True)
+        mute.setChecked(row.muted)
+        mute.setToolTip('Mute')
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(row.volume)
+        slider.setFocusPolicy(Qt.NoFocus)
+        value = QLabel(str(row.volume))
+        value.setFixedWidth(26)
+        value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        def moved(level, key=row.key):
+            if not self.dock.testing:
+                audio.set_app_volume(key, percent=level, muted=False if mute.isChecked() else None)
+            value.setText(str(level))
+            if mute.isChecked():
+                mute.blockSignals(True)
+                mute.setChecked(False)
+                mute.setText(L.G['volume'])
+                mute.blockSignals(False)
+
+        def toggled(on, key=row.key):
+            if not self.dock.testing:
+                audio.set_app_volume(key, muted=on)
+            mute.setText(L.G['mute'] if on else L.G['volume'])
+
+        slider.valueChanged.connect(moved)
+        mute.toggled.connect(toggled)
+        line.addWidget(icon)
+        line.addWidget(label)
+        line.addWidget(mute)
+        line.addWidget(slider, 1)
+        line.addWidget(value)
+        return line
 
 
 class OutputSwitch(QWidget):
