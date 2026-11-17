@@ -287,6 +287,18 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(list(group.extra), ['DISPLAY2'])
 
 
+class StyleTests(unittest.TestCase):
+    def test_settings_colours_stay_valid_at_every_glass_opacity(self):
+        """At 80% the panels' shade came to 264 of 255: Qt took the colour as invalid and drew them black."""
+        import re
+        from dockline import look as L
+        for name in ('glass', 'glass_light'):
+            for opacity in range(0, 101, 5):
+                css = L.settings_css(L.LOOKS[name], opacity)
+                for alpha in re.findall(r'rgba\(\d+,\s*\d+,\s*\d+,\s*(\d+)\)', css):
+                    self.assertLessEqual(int(alpha), 255, (name, opacity))
+
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 

@@ -338,12 +338,12 @@ def settings_css(look: 'Look', opacity: int = 18) -> str:
             tint = f'rgba(16,16,22,{round(255 * share)})'
             styles = (tint, 'transparent', '#ffffff', 'rgba(255,255,255,170)', 'rgba(255,255,255,18)',
                       'rgba(255,255,255,40)', 'rgba(255,255,255,30)',
-                      (f'rgba(16,16,22,{max(150, round(255 * share) + 60)})', 'rgba(255,255,255,30)'),
+                      (f'rgba(16,16,22,{min(255, max(150, round(255 * share) + 60))})', 'rgba(255,255,255,30)'),
                       'rgba(255,255,255,16)')
         else:
             tint = f'rgba(255,255,255,{round(255 * share)})'
             styles = (tint, 'transparent', '#0a0a0a', '#4a4a52', 'rgba(255,255,255,150)', 'rgba(0,0,0,28)',
-                      'rgba(0,0,0,16)', (f'rgba(255,255,255,{max(185, round(255 * share) + 60)})', 'rgba(0,0,0,22)'),
+                      'rgba(0,0,0,16)', (f'rgba(255,255,255,{min(255, max(185, round(255 * share) + 60))})', 'rgba(0,0,0,22)'),
                       'rgba(255,255,255,130)')
     else:
         styles = WINDOW_STYLES.get(look.name, WINDOW_STYLES['black' if look.dark else 'white'])
