@@ -24,7 +24,10 @@ a = Analysis(
     binaries=qt_plugin_binaries,
     datas=[],
     hiddenimports=['dockline', 'dockline.app', 'dockline.dock', 'dockline.widgets', 'dockline.picker',
-                   'dockline.settings_window', 'PySide6.QtNetwork'],
+                   'dockline.settings_window', 'dockline.media', 'PySide6.QtNetwork',
+                   'winrt.runtime', 'winrt.system', 'winrt.windows.foundation',
+                   'winrt.windows.foundation.collections', 'winrt.windows.media.control',
+                   'winrt.windows.storage.streams'],
     hookspath=[],
     excludes=[
         'tkinter', 'unittest', 'pydoc_data', 'lib2to3', 'test',

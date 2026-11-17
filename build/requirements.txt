@@ -1,2 +1,7 @@
 PySide6-Essentials==6.11.2
 pyinstaller==6.22.3
+winrt-runtime==3.2.1
+winrt-Windows.Foundation==3.2.1
+winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Media.Control==3.2.1
+winrt-Windows.Storage.Streams==3.2.1

@@ -162,6 +162,26 @@ class DockTests(Temp):
                                  'Close window', 'End task'])
         self.assertFalse(tile.owns_menu(centre + type(centre)(tile.width() + 50, 0)))
 
+    def test_media_card_scrolls_through_sources(self):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        dock = self.make()
+        dock.cfg['widgets'] = ['media']
+        dock.rebuild()
+        tile = next(t for t in dock.tiles if t.ID == 'media')
+        self.assertEqual(tile.width(), tile.height())              # a small button now
+        tile.click(tile.rect().center())
+        carousel = tile.carousel
+        self.assertEqual([p.session.app for p in carousel.pages], ['Music', 'Browser'])
+        wheel = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(), QPoint(0, -120), Qt.NoButton,
+                            Qt.NoModifier, Qt.NoScrollPhase, False)
+        carousel.wheelEvent(wheel)
+        self.assertEqual(carousel.index, 1)
+        carousel.wheelEvent(wheel)
+        self.assertEqual(carousel.index, 1)                        # the last one stays
+        self.assertFalse(carousel.pages[1].buttons['next'].isEnabled())
+        tile.card.close()
+
     def test_language_tile_draws(self):
         dock = self.make()
         tile = next(t for t in dock.tiles if t.ID == 'language')

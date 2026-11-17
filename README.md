@@ -9,6 +9,8 @@ What it does in the taskbar's place:
 
 - Pinned apps (the Windows taskbar's pins are brought over at first start, and from Settings) and
   open windows, grouped by program; a program's windows show on its pinned shortcut.
+- Search opens Windows search. Media is one button: its card has a page per app playing sound,
+  with art, title and controls, turned with the scroll wheel, as Android's media player.
 - Previews on hover, attention flashing, middle-click or Shift+click for a new window, End task.
 - Files dragged onto an app open in it; held over an open app, its window comes forward. Programs
   and shortcuts dragged onto the dock are pinned. A hidden dock comes up for a file drag.

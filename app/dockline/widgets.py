@@ -860,37 +860,14 @@ class AppsTile(Tile):
 
 class SearchTile(Tile):
     ID, NAME, GROUP = 'search', 'Search', 'Apps & Files'
-    ABOUT = 'Search the web, or enter a folder or file path to open it.'
+    ABOUT = 'Opens Windows search.'
 
     def paint(self, painter, rect, look):
         L.glyph(painter, rect, 'search', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
-        field = QLineEdit()
-        field.setPlaceholderText('Search the web or enter a path')
-        layout.addWidget(field)
-
-        def go():
-            query = field.text().strip()
-            if not query:
-                return
-            if self.card:
-                self.card.close()
-            path = os.path.expandvars(os.path.expanduser(query))
-            if os.path.exists(path):
-                _open(path)
-            elif query.startswith(('http://', 'https://')) or ('.' in query and ' ' not in query
-                                                                and '/' not in query[:query.find('.')]):
-                webbrowser.open(query if '://' in query else f'https://{query}')
-            else:
-                webbrowser.open('https://www.google.com/search?q=' + urllib.parse.quote_plus(query))
-
-        field.returnPressed.connect(go)
-        self.open_card(content, 360)
-        field.setFocus()
+        if not self.dock.testing:
+            win.press(win.VK_LWIN, ord('S'))           # Windows' own search, as the taskbar's button opens
 
 
 class RecycleTile(Tile):
@@ -1314,42 +1291,333 @@ class DayProgressTile(Tile):
 
 # ================================================================ Media & Audio
 
-class MediaTile(Tile):
-    ID, NAME, GROUP = 'media', 'Media Controls', 'Media & Audio'
-    ABOUT = 'Previous, play or pause, and next for whatever is playing.'
-    WIDTH = 2.4
+MUSIC = ''                 # Fluent's music note
 
-    def setup(self):
-        self.zone = -1
 
-    def zone_at(self, pos) -> int:
-        return min(2, max(0, int(pos.x() / (self.width() / 3))))
+class _MediaButton(QWidget):
+    """Previous, play or pause, or next on a media page: a glyph, a circle under the pointer."""
 
-    def paint(self, painter, rect, look):
-        third = rect.width() / 3
-        colour = look.c(look.text)
-        for index in range(3):
-            box = QRectF(rect.x() + index * third, rect.y(), third, rect.height())
-            if index == self.zone and self.hover:
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(look.c(look.hover))
-                painter.drawRoundedRect(box.adjusted(2, 2, -2, -2), 8, 8)
-            if index == 1:
-                side = rect.height() * 0.3
-                L.play_pause(painter, QRectF(box.center().x() - side / 2, box.center().y() - side / 2, side, side),
-                             colour)
-            else:
-                L.glyph(painter, box, 'prev' if index == 0 else 'next', colour, rect.height() * 0.28)
+    def __init__(self, page, kind: str, big: bool = False):
+        super().__init__(page)
+        self.page, self.kind, self.big = page, kind, big
+        self.hover = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFixedSize(44 if big else 36, 44 if big else 36)
 
-    def mouseMoveEvent(self, event):
-        super().mouseMoveEvent(event)
-        zone = self.zone_at(event.position())
-        if zone != self.zone:
-            self.zone = zone
+    def enterEvent(self, _):
+        self.hover = True
+        self.update()
+
+    def leaveEvent(self, _):
+        self.hover = False
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self.rect().contains(event.position().toPoint()) and self.isEnabled():
+            self.page.pressed(self.kind)
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        ink = self.page.ink()
+        if not self.isEnabled():
+            ink.setAlpha(90)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self.big:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(ink)
+            painter.drawEllipse(rect)
+            ink = self.page.under_ink()
+        elif self.hover:
+            fill = QColor(ink)
+            fill.setAlpha(40)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill)
+            painter.drawEllipse(rect)
+        if self.kind != 'toggle':
+            L.glyph(painter, rect, 'prev' if self.kind == 'previous' else 'next', ink, rect.height() * 0.42)
+            return
+        painter.setPen(Qt.NoPen)                          # play and pause drawn as shapes: crisp at any size
+        painter.setBrush(ink)
+        side = rect.height() * 0.34
+        middle = rect.center()
+        if self.page.session.playing:
+            bar = side * 0.32
+            for x in (middle.x() - side / 2, middle.x() + side / 2 - bar):
+                painter.drawRoundedRect(QRectF(x, middle.y() - side / 2, bar, side), bar / 3, bar / 3)
+        else:
+            from PySide6.QtCore import QPointF
+            from PySide6.QtGui import QPolygonF
+            left = middle.x() - side * 0.36
+            painter.drawPolygon(QPolygonF([QPointF(left, middle.y() - side / 2), QPointF(left, middle.y() + side / 2),
+                                           QPointF(left + side * 0.9, middle.y())]))
+
+
+class _MediaPage(QWidget):
+    """One app's session, as a card in Android's media player: its art behind, its name, the title
+    and artist, and the controls."""
+
+    HEIGHT = 156
+
+    def __init__(self, carousel, session):
+        super().__init__(carousel)
+        self.carousel = carousel
+        self.session = None
+        self.art = QPixmap()
+        self.buttons = {kind: _MediaButton(self, kind, kind == 'toggle') for kind in ('previous', 'toggle', 'next')}
+        self.show_session(session)
+
+    def show_session(self, session) -> None:
+        if self.session is None or session.art != self.session.art:
+            self.art = QPixmap()
+            if session.art:
+                self.art.loadFromData(session.art)
+        self.session = session
+        self.buttons['previous'].setEnabled(session.can_previous)
+        self.buttons['next'].setEnabled(session.can_next)
+        self.buttons['toggle'].setEnabled(session.can_toggle)
+        self.update()
+        for button in self.buttons.values():
+            button.update()
+
+    def on_art(self) -> bool:
+        return not self.art.isNull()
+
+    def ink(self) -> QColor:
+        return QColor('#ffffff') if self.on_art() else self.carousel.look.c(self.carousel.look.text)
+
+    def under_ink(self) -> QColor:
+        return QColor('#111114') if self.on_art() or self.carousel.look.dark else QColor('#fafafa')
+
+    def pressed(self, kind: str) -> None:
+        self.carousel.command(self.session, kind)
+
+    def resizeEvent(self, _):
+        middle, bottom = self.width() / 2, self.height() - 14
+        toggle = self.buttons['toggle']
+        toggle.move(round(middle - toggle.width() / 2), round(bottom - toggle.height()))
+        for kind, shift in (('previous', -60), ('next', 60)):
+            button = self.buttons[kind]
+            button.move(round(middle + shift - button.width() / 2), round(bottom - toggle.height() / 2 - button.height() / 2))
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        look = self.carousel.look
+        rect = QRectF(self.rect())
+        from PySide6.QtGui import QPainterPath, QLinearGradient
+        shape = QPainterPath()
+        shape.addRoundedRect(rect, 12, 12)
+        painter.setClipPath(shape)
+        if self.on_art():                                  # the art fills the card, darkened to read on
+            scaled = self.art.size().scaled(self.size(), Qt.KeepAspectRatioByExpanding)
+            source = QRectF((scaled.width() - self.width()) / 2, (scaled.height() - self.height()) / 2,
+                            self.width(), self.height())
+            ratio = self.art.width() / max(1, scaled.width())
+            painter.drawPixmap(rect, self.art, QRectF(source.x() * ratio, source.y() * ratio,
+                                                      source.width() * ratio, source.height() * ratio))
+            shade = QLinearGradient(0, 0, 0, rect.height())
+            shade.setColorAt(0, QColor(0, 0, 0, 120))
+            shade.setColorAt(1, QColor(0, 0, 0, 190))
+            painter.fillRect(rect, shade)
+        else:
+            painter.fillRect(rect, look.c(look.hover))
+        ink = self.ink()
+        soft = QColor(ink)
+        soft.setAlpha(190)
+        session = self.session
+        L.text(painter, QRectF(14, 10, rect.width() - 28, 18), session.app, soft, 12, 500, Qt.AlignLeft | Qt.AlignVCenter)
+        L.text(painter, QRectF(14, 34, rect.width() - 28, 22), session.title or 'Unknown title', ink, 16, 600,
+               Qt.AlignLeft | Qt.AlignVCenter)
+        L.text(painter, QRectF(14, 56, rect.width() - 28, 18), session.artist, soft, 13, 400,
+               Qt.AlignLeft | Qt.AlignVCenter)
+
+
+class _MediaCarousel(QWidget):
+    """Every app's session side by side, one in view: the wheel turns them, the dots show which."""
+
+    DOTS = 18
+
+    def __init__(self, tile, sessions):
+        super().__init__()
+        self.tile = tile
+        self.look = tile.look
+        self.pages: list[_MediaPage] = []
+        self.index = 0
+        self.shown = 0.0                                   # the page in view, fractional while sliding
+        self._slide = None
+        self._wheel = 0.0
+        self.setFixedHeight(_MediaPage.HEIGHT + self.DOTS)
+        self.show_sessions(sessions)
+
+    def show_sessions(self, sessions) -> None:
+        current = self.pages[self.index].session.id if self.pages else ''
+        if [p.session.id for p in self.pages] == [s.id for s in sessions]:
+            for page, session in zip(self.pages, sessions):
+                page.show_session(session)
+            return
+        for page in self.pages:
+            page.deleteLater()
+        self.pages = [_MediaPage(self, session) for session in sessions]
+        ids = [s.id for s in sessions]
+        self.index = ids.index(current) if current in ids else 0
+        self.shown = float(self.index)
+        for page in self.pages:
+            page.show()
+        self.lay_out()
+        self.update()
+
+    def lay_out(self) -> None:
+        for number, page in enumerate(self.pages):
+            page.setGeometry(round((number - self.shown) * (self.width() + 12)), 0, self.width(), _MediaPage.HEIGHT)
+
+    def resizeEvent(self, _):
+        self.lay_out()
+
+    def go(self, index: int) -> None:
+        index = max(0, min(len(self.pages) - 1, index))
+        if index == self.index:
+            return
+        self.index = index
+        start = self.shown
+        if self._slide is not None:
+            try:
+                self._slide.stop()
+            except RuntimeError:
+                pass
+
+        def step(progress):
+            self.shown = start + (index - start) * progress
+            self.lay_out()
             self.update()
 
+        def done():
+            self._slide = None
+            self.shown = float(index)
+            self.lay_out()
+
+        if motion.on() and not self.tile.dock.testing:
+            self._slide = motion.run(self, motion.SLIDE_MS, step, done)
+        else:
+            done()
+            self.update()
+
+    def wheelEvent(self, event):
+        delta = event.angleDelta()
+        self._wheel += -(delta.y() or delta.x()) / 120
+        if abs(self._wheel) >= 1:
+            self.go(self.index + (1 if self._wheel > 0 else -1))
+            self._wheel = 0.0
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.position().y() < _MediaPage.HEIGHT:
+            return
+        for number, dot in enumerate(self.dot_rects()):
+            if dot.adjusted(-6, -6, 6, 6).contains(event.position()):
+                self.go(number)
+
+    def dot_rects(self) -> list[QRectF]:
+        count = len(self.pages)
+        width = count * 6 + (count - 1) * 6
+        left = (self.width() - width) / 2
+        return [QRectF(left + i * 12, _MediaPage.HEIGHT + 8, 6, 6) for i in range(count)]
+
+    def paintEvent(self, _):
+        if len(self.pages) < 2:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        for number, dot in enumerate(self.dot_rects()):
+            colour = self.look.c(self.look.text)
+            colour.setAlpha(230 if number == self.index else 70)
+            painter.setBrush(colour)
+            painter.drawEllipse(dot)
+
+    def command(self, session, kind: str) -> None:
+        if self.tile.dock.testing:
+            return
+        from . import media
+        media.media().command(session.id, kind)
+        if kind == 'toggle':                               # shown at once; the next look confirms it
+            from dataclasses import replace
+            for page in self.pages:
+                if page.session.id == session.id:
+                    page.show_session(replace(page.session, playing=not page.session.playing))
+
+
+class MediaTile(Tile):
+    ID, NAME, GROUP = 'media', 'Media', 'Media & Audio'
+    ABOUT = "Every app playing sound, one card each, as Android's media player: scroll through them to play, " \
+            'pause or skip.'
+
+    def setup(self):
+        self.sessions = []
+        self.carousel = None
+        if self.dock.testing:
+            from .media import Session
+            self.sessions = [Session('sample.music', 'Music', 'Song title', 'Artist', True, True, True, True),
+                             Session('sample.video', 'Browser', 'Video title', 'Channel', False, True, False, False)]
+            return
+        from . import media
+        self.source = media.media()
+        self.source.changed.connect(self.sessions_changed)
+        self.sessions = list(self.source.sessions)
+
+    def retire(self):
+        if not self.dock.testing:
+            try:
+                self.source.changed.disconnect(self.sessions_changed)
+            except (RuntimeError, TypeError):
+                pass
+
+    def sessions_changed(self, sessions):
+        self.sessions = sessions
+        self.update()
+        if self.carousel is not None:
+            try:
+                self.carousel.show_sessions(sessions)
+                self.empty.setVisible(not sessions)
+                self.carousel.setVisible(bool(sessions))
+                if self.card is not None:
+                    self.card.adjustSize()
+            except RuntimeError:
+                self.carousel = None
+
+    def playing(self) -> bool:
+        return any(s.playing for s in self.sessions)
+
+    def paint(self, painter, rect, look):
+        L.glyph(painter, rect, MUSIC, look.c(look.text), rect.height() * 0.36)
+        if self.playing():                                 # something plays: a dot under the note
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(look.c(look.text))
+            painter.drawRoundedRect(QRectF(rect.center().x() - 5, rect.bottom() - 7, 10, 2.5), 1.25, 1.25)
+        playing = next((s for s in self.sessions if s.playing), None)
+        self.setToolTip(f'{playing.title} - {playing.app}' if playing and playing.title else 'Media')
+
     def click(self, pos):
-        win.press((win.VK_MEDIA_PREV, win.VK_MEDIA_PLAY_PAUSE, win.VK_MEDIA_NEXT)[self.zone_at(pos)])
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.empty = _label('No media playing.', 'sub')
+        self.carousel = _MediaCarousel(self, self.sessions)
+        self.empty.setVisible(not self.sessions)
+        self.carousel.setVisible(bool(self.sessions))
+        layout.addWidget(self.empty)
+        layout.addWidget(self.carousel)
+        if not self.dock.testing:
+            self.source.quick(True)
+        self.open_card(content, 340)
+
+    def card_closed(self):
+        self.carousel = None
+        if not self.dock.testing:
+            self.source.quick(False)
+        super().card_closed()
 
 
 class VolumeTile(Tile):
