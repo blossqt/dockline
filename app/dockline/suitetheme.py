@@ -1608,6 +1608,7 @@ class _Frosting(QObject):
                 return _paint_backdrop(obj, event)
         elif kind == QEvent.Show:
             _place(obj)
+            _stop_unpainted(obj)
             if _screen_glass(obj):
                 _capture(obj)                       # not on screen yet: what is behind it, as it is
                 _watch_around(obj, start=True)
@@ -1617,15 +1618,20 @@ class _Frosting(QObject):
                 _apply_glass(obj)
             _animate_parts(obj)
             if _frameless(obj) and obj.property('_suite_fade'):
-                _open(obj)
+                if _screen_glass(obj) and motion_on() and _unpainted_behind(obj):
+                    _wait_for_paint(obj)            # the program behind hasn't drawn its first frame yet
+                else:
+                    obj.setWindowOpacity(1.0)
+                    _open(obj)
             elif not _frameless(obj):
                 _settle_in(obj)
         elif kind == QEvent.Hide:
+            _stop_unpainted(obj)
             _remember_place(obj)
             _stop_live(obj)
             _watch_around(obj, stop=True)
         elif kind in (QEvent.Move, QEvent.Resize) and obj.isVisible() and _screen_glass(obj):
-            if not getattr(obj, '_suite_gliding', False):
+            if not getattr(obj, '_suite_gliding', False) and not _waiting_for_paint(obj):
                 _follow(obj)
             if kind == QEvent.Move and not _frameless(obj):
                 _rim_soon(obj)                      # only its rim changes as it is dragged
@@ -1920,17 +1926,38 @@ def _clean(shot, got: QRect, want: QRect, dragged: list = (), covered: QRect | N
     """A shot of the screen (a QImage), on any thread, as the glass wants it: the images of anything
     being dragged taken out (dragged, in its pixels: _heal), made up to the size wanted, and where
     the window is (covered, in the screen's coordinates, with its shadow) filled in from its last
-    clean shot (before, of the screen from before_at), which had none of the window in it."""
+    clean shot (before, of the screen from before_at), or healed from around it when the scene
+    behind the window changed meanwhile."""
     if dragged:
         shot = _heal(shot, dragged)
     if got != want:
         shot = _fill_out(shot, got, want)
-    if covered is not None and before is not None and before_at is not None:
-        painter = QPainter(shot)
-        painter.setClipRect(QRectF(covered.translated(-want.topLeft())))
-        painter.drawImage(QPointF(before_at.x() - want.x(), before_at.y() - want.y()), before)
-        painter.end()
+    if covered is not None:
+        if before is not None and before_at is not None \
+                and not _scene_changed(shot, want.topLeft(), before, before_at, covered):
+            painter = QPainter(shot)
+            painter.setClipRect(QRectF(covered.translated(-want.topLeft())))
+            painter.drawImage(QPointF(before_at.x() - want.x(), before_at.y() - want.y()), before)
+            painter.end()
+        else:
+            dpr = shot.devicePixelRatio()
+            c = covered.translated(-want.topLeft())
+            part = QRect(round(c.x() * dpr), round(c.y() * dpr), round(c.width() * dpr), round(c.height() * dpr))
+            shot = _heal(shot, [part])
     return shot
+
+
+def _scene_changed(shot: QImage, shot_at: QPoint, before: QImage, before_at: QPoint, covered: QRect) -> bool:
+    """Whether what lies just outside covered in shot differs from before - the window behind
+    repainted, scrolled or gave way to another since before was taken, so before no longer holds
+    what is under the pop-up."""
+    gap, strip = _AROUND
+    outer = covered.adjusted(-gap - strip, -gap - strip, gap + strip, gap + strip)
+    now = _around_from(shot, shot_at, outer, covered)
+    was = _around_from(before, before_at, outer, covered)
+    if now is None or was is None or len(now) != len(was) or not now:
+        return True
+    return sum(abs(a - b) for a, b in zip(now, was)) / len(now) > 0.05
 
 
 def _made(shot, got: QRect, want: QRect, blur: int, framed: bool, tone: bool, margin: int = _MARGIN,
@@ -2010,7 +2037,8 @@ def _heal(shot, parts: list) -> QImage:
     return image
 
 
-def _took(window: QWidget, shot, at: QPoint, tone: tuple | None, clean: QImage | None = None) -> None:
+def _took(window: QWidget, shot, at: QPoint, tone: tuple | None, clean: QImage | None = None,
+          fresh: bool = False) -> None:
     """A window has a new shot for its glass: shown - for a framed window only along its rim,
     unless the tint changed with it. A pop-up keeps the shot as it was before it was softened
     (clean), to fill its next one in from where it is (_clean)."""
@@ -2020,11 +2048,12 @@ def _took(window: QWidget, shot, at: QPoint, tone: tuple | None, clean: QImage |
     window._suite_shot_at = at
     if clean is not None:
         window._suite_clean, window._suite_clean_at = clean, at
+        window._suite_around = _window_around(window)
     framed = not _frameless(window)
     tint = _clear_tint(window) if framed else None
     if tone is not None:
         old = getattr(window, '_suite_tone', None)
-        if old is not None and (_live(window) or framed):
+        if old is not None and (_live(window) or framed) and not fresh:
             tone = tuple(0.6 * a + 0.4 * b for a, b in zip(old, tone))
         window._suite_tone = tone
     if framed and (not _clear(window) or _clear_tint(window) == tint):
@@ -2060,7 +2089,7 @@ def _capture_later(window: QWidget, final: bool) -> bool:
         if w is None or not w.isVisible():
             return
         if made is not None:
-            _took(w, *made[0], clean=made[1])
+            _took(w, *made[0], clean=made[1], fresh=final and not framed)
         if final and not _live(w):
             _stop_live(w)
 
@@ -2388,11 +2417,86 @@ def _live_frame(window: QWidget) -> None:
         window._suite_live.stop()
 
 
+_UNPAINTED_MS, _UNPAINTED_TRIES = 60, 6
+
+
+def _unpainted_behind(window: QWidget) -> bool:
+    """Whether the shot behind a newly opened pop-up caught only an unpainted black surface (a
+    program that gave a box the keyboard a moment before its first frame reached the screen)."""
+    tone = getattr(window, '_suite_tone', None)
+    return tone is not None and tone[0] < 0.015 and tone[1] < 0.002
+
+
+def _waiting_for_paint(window: QWidget) -> bool:
+    timer = getattr(window, '_suite_paint_wait', None)
+    return timer is not None and timer.isActive()
+
+
+def _stop_unpainted(window: QWidget) -> None:
+    timer = getattr(window, '_suite_paint_wait', None)
+    if timer is not None and timer.isActive():
+        timer.stop()
+        window.setWindowOpacity(1.0)
+
+
+def _wait_for_paint(window: QWidget) -> None:
+    """Keep a pop-up unseen for up to a third of a second while the window behind it paints its
+    first frame, taking the shot again each tick, then fade it in over the real page."""
+    window.setWindowOpacity(0.0)
+    window._suite_paint_tries = 0
+    timer = getattr(window, '_suite_paint_wait', None)
+    if timer is None:
+        timer = window._suite_paint_wait = QTimer(window)
+        timer.setInterval(_UNPAINTED_MS)
+        ref = weakref.ref(window)
+
+        def tick() -> None:
+            w = ref()
+            if w is None or not w.isVisible():
+                timer.stop()
+                return
+            w._suite_paint_tries += 1
+            _capture(w)
+            if not _unpainted_behind(w) or w._suite_paint_tries >= _UNPAINTED_TRIES:
+                timer.stop()
+                _watch_around(w, start=True)
+                _apply_glass(w)
+                w.setWindowOpacity(1.0)
+                _open(w)
+        timer.timeout.connect(tick)
+    timer.start()
+
+
 def _stop_live(window: QWidget) -> None:
     timer = getattr(window, '_suite_live', None)
     if timer is not None:
         timer.stop()
-    window._suite_around = None
+    window._suite_around = _window_around(window)
+
+
+def _around_of(window: QWidget) -> tuple | None:
+    g = window.frameGeometry()
+    screen = QGuiApplication.screenAt(g.center()) or window.screen() or QGuiApplication.primaryScreen()
+    gap, strip = _AROUND
+    outer = g.adjusted(-gap - strip, -gap - strip, gap + strip, gap + strip).intersected(screen.geometry())
+    return None if outer.isEmpty() else (screen, outer, g)
+
+
+def _around_from(clean: QImage, at: QPoint, outer: QRect, g: QRect) -> list | None:
+    dpr = clean.devicePixelRatio()
+    box = QRect(at.x(), at.y(), round(clean.width() / dpr), round(clean.height() / dpr))
+    if not box.contains(outer):
+        return None
+    piece = clean.copy(QRect(round((outer.x() - at.x()) * dpr), round((outer.y() - at.y()) * dpr),
+                             round(outer.width() * dpr), round(outer.height() * dpr)))
+    piece.setDevicePixelRatio(dpr)
+    return _around(piece, outer, g)
+
+
+def _window_around(window: QWidget) -> list | None:
+    clean, at = getattr(window, '_suite_clean', None), getattr(window, '_suite_clean_at', None)
+    found = _around_of(window) if clean is not None and at is not None else None
+    return _around_from(clean, at, found[1], found[2]) if found is not None else None
 
 
 def _watch_around(window: QWidget, start: bool = False, stop: bool = False) -> None:
@@ -2405,22 +2509,22 @@ def _watch_around(window: QWidget, start: bool = False, stop: bool = False) -> N
             timer.stop()
         return
     if start:
+        ref = weakref.ref(window)
         if timer is None:
             timer = window._suite_watch = QTimer(window)
             timer.setInterval(_WATCH_MS)
-            ref = weakref.ref(window)
             timer.timeout.connect(lambda: (w := ref()) is not None and _watch_around(w))
-        window._suite_around = None
+        window._suite_around = _window_around(window)
         timer.start()
+        QTimer.singleShot(220, window, lambda: (w := ref()) is not None and _watch_around(w))
         return
-    if not window.isVisible() or _live(window) or not _screen_glass(window) or _button_down() or quiet_now():
+    if not window.isVisible() or _live(window) or _waiting_for_paint(window) \
+            or not _screen_glass(window) or _button_down() or quiet_now():
         return
-    g = window.frameGeometry()
-    screen = QGuiApplication.screenAt(g.center()) or window.screen() or QGuiApplication.primaryScreen()
-    gap, strip = _AROUND
-    outer = g.adjusted(-gap - strip, -gap - strip, gap + strip, gap + strip).intersected(screen.geometry())
-    if outer.isEmpty():
+    found = _around_of(window)
+    if found is None:
         return
+    screen, outer, g = found
     ref = weakref.ref(window)
 
     def then(now):
