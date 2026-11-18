@@ -745,7 +745,191 @@ class AIUsageTests(Temp):
             cfg = Config(None)
             cfg['ai_enabled'] = ['claude', 'gemini']
             cfg['widgets'] = ['ai_limits']
-            dock = Dock(cfg, testing=False)
+            dock = Dock(cfg, testing=True)
+            dock.testing = False
+            dock.ai.stop()
+            dock.ai.latest['chatgpt'] = {'connected': False, 'signed_in': False, 'plan': '', 'windows': [],
+                                         'updated_at': None, 'error': ''}
+            screen = QGuiApplication.primaryScreen().geometry()
+            dock_y = screen.bottom() - 58
+            dock.setGeometry(QRect(screen.center().x() - 200, dock_y, 400, 52))
+            dock.show()
+            QApplication.processEvents()
+
+            tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+            tile.click(tile.rect().center())
+            card = tile.card
+            QApplication.processEvents()
+            initial_bottom = card.geometry().bottom()
+            self.assertLessEqual(initial_bottom, dock_y - 7)
+            self.assertLessEqual(initial_bottom, screen.bottom())
+
+            toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+            toggle.click()
+            QApplication.processEvents()
+            self.assertEqual(card.geometry().bottom(), initial_bottom)
+
+            # Toggle ChatGPT ON (adds wrapped multi-line hint + On bar row) and process deferred LayoutRequest
+            chatgpt_btn = [b for b in card.findChildren(QPushButton) if b.text() == 'ChatGPT'][0]
+            chatgpt_btn.click()
+            QApplication.processEvents()
+            self.assertLessEqual(card.geometry().bottom(), initial_bottom)
+            self.assertGreaterEqual(card.geometry().top(), screen.top())
+
+            # Toggle ChatGPT OFF again
+            chatgpt_btn.click()
+            QApplication.processEvents()
+            self.assertEqual(card.geometry().bottom(), initial_bottom)
+
+            from dockline.card import Card
+            card.close()
+            dock.stop()
+            dock.testing = True
+            dock.close()
+            dock.deleteLater()
+            QApplication.processEvents()
+            QApplication.processEvents()
+            Card.release_closed()
+        finally:
+            motion.on = real_motion
+
+
+    def test_antigravity_quota_endpoint_and_ring_widget_styles(self):
+        from PySide6.QtWidgets import QPushButton
+        from dockline import ai
+        from dockline.dock import Dock
+
+        urls = []
+
+        def fake_agy_opener(url, method='GET', headers=None, body=None, timeout=8):
+            urls.append(url)
+            if 'loadCodeAssist' in url:
+                return {'cloudaicompanionProject': 'agy-proj-1'}
+            if 'daily-cloudcode-pa.googleapis.com' in url:
+                return {
+                    'buckets': [
+                        {'modelId': 'gemini-4-hydrogen-sonar', 'remainingFraction': 0.72, 'resetTime': '2027-01-15T12:00:00Z'},
+                        {'modelId': 'gemini-3-flash', 'remainingFraction': 0.72, 'resetTime': '2027-01-15T12:00:00Z'},
+                        {'modelId': 'claude-sonnet-4-6', 'remainingFraction': 0.90, 'resetTime': '2027-01-15T14:00:00Z'},
+                    ]
+                }
+            return {'buckets': []}
+
+        empty_home = self.folder / 'agy-home'
+        empty_home.mkdir()
+        state = ai.fetch_gemini(
+            home=empty_home,
+            opener=fake_agy_opener,
+            cred_reader=lambda: [('gemini:antigravity', 'agy-tok', None, 100.0)],
+        )
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['plan'], 'Antigravity')
+        self.assertTrue(any('daily-cloudcode-pa.googleapis.com' in u for u in urls))
+        self.assertEqual([(w['label'], w['used']) for w in state['windows']],
+                         [('Pro', 28.0), ('Flash', 28.0), ('Claude (AGY)', 10.0)])
+
+        cfg = Config(None)
+        cfg['widgets'] = ['ai_limits']
+        dock = Dock(cfg, testing=True)
+        tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+        self.assertEqual(tile._tile_style(), 'rings')
+        tile.grab()
+
+        tile.click(tile.rect().center())
+        card = tile.card
+        toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+        toggle.click()
+        for style_word, expected in (('Gauges', 'gauges'), ('Bars', 'bars'), ('Rings', 'rings')):
+            btn = next(b for b in card.findChildren(QPushButton) if b.text() == style_word)
+            btn.click()
+            self.assertEqual(cfg['ai_tile_style'], expected)
+            tile.grab()
+        card.close()
+        dock.deleteLater()
+
+
+    def test_usage_rings_stay_visible_as_tile_compacts(self):
+        """Compacting empty space must never hide the usage status circles while shrinking the tile."""
+        from PySide6.QtCore import QRectF
+        from dockline import look as L
+        from dockline.dock import Dock
+
+        cfg = Config(None)
+        cfg['widgets'] = ['ai_limits']
+        dock = Dock(cfg, testing=True)
+        tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+
+        real_ring = L.ring
+        for width in (210, 175, 136, 108, 78):
+            tile.setFixedWidth(width)
+            ring_calls = []
+
+            def spy_ring(painter, rect, *rest, out=ring_calls):
+                out.append(QRectF(rect))
+                return real_ring(painter, rect, *rest)
+
+            L.ring = spy_ring
+            try:
+                tile.grab()
+            finally:
+                L.ring = real_ring
+            self.assertEqual(len(ring_calls), 2, f'expected 2 rings at width={width}, got {len(ring_calls)}')
+        dock.deleteLater()
+
+    def test_widget_resize_handles_and_reset(self):
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from dockline.dock import Dock
+
+        cfg = Config(None)
+        cfg['widgets'] = ['start', 'weather', 'clock']
+        dock = Dock(cfg, testing=True)
+        dock.set_editing(True)
+        start_tile = next(tile for tile in dock.tiles if tile.ID == 'start')
+        weather_tile = next(tile for tile in dock.tiles if tile.ID == 'weather')
+        self.assertFalse(start_tile.resizable())
+        self.assertTrue(weather_tile.resizable())
+
+        default_w = weather_tile.width()
+        grip_pt = weather_tile.handle_rect().center()
+        press = QMouseEvent(QEvent.MouseButtonPress, grip_pt, QPointF(200, 20), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+        move = QMouseEvent(QEvent.MouseMove, grip_pt + QPointF(24, 0), QPointF(224, 20), Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+        release = QMouseEvent(QEvent.MouseButtonRelease, grip_pt + QPointF(24, 0), QPointF(224, 20), Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+        weather_tile.mousePressEvent(press)
+        weather_tile.mouseMoveEvent(move)
+        weather_tile.mouseReleaseEvent(release)
+
+        self.assertEqual(weather_tile.width(), default_w + 24)
+        self.assertIn('weather', cfg['widget_widths'])
+
+        # Rebuilding the dock preserves the saved custom width, and reset_width restores default
+        dock.rebuild()
+        weather_tile = next(tile for tile in dock.tiles if tile.ID == 'weather')
+        self.assertEqual(weather_tile.width(), default_w + 24)
+        weather_tile.reset_width()
+        self.assertEqual(weather_tile.width(), default_w)
+        self.assertNotIn('weather', cfg['widget_widths'])
+        dock.deleteLater()
+
+
+    def test_ai_card_stays_on_screen_when_toggling_services(self):
+        """Showing or hiding an AI service inside an open card must grow/shrink upward from the dock
+        rather than letting Qt push the bottom of the card below the dock or off the screen."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication, QPushButton
+        from dockline import motion
+        from dockline.dock import Dock
+
+        real_motion = motion.on
+        motion.on = lambda: False
+        try:
+            cfg = Config(None)
+            cfg['ai_enabled'] = ['claude', 'gemini']
+            cfg['widgets'] = ['ai_limits']
+            dock = Dock(cfg, testing=True)
+            dock.testing = False
+            dock.ai.stop()
             dock.ai.latest['chatgpt'] = {'connected': False, 'signed_in': False, 'plan': '', 'windows': [],
                                          'updated_at': None, 'error': ''}
             screen = QGuiApplication.primaryScreen().geometry()
@@ -780,8 +964,10 @@ class AIUsageTests(Temp):
             self.assertEqual(card.geometry().bottom(), initial_bottom)
 
             card.close()
+            dock.testing = True
             dock.close()
             dock.deleteLater()
+            QApplication.processEvents()
         finally:
             motion.on = real_motion
 

@@ -282,6 +282,7 @@ class Dock(QWidget):
 
     def stop(self) -> None:
         """Give the screen and the taskbar back."""
+        self.ai.stop()
         self.ticker.stop()
         self.keeper.stop()
         self.peek.stop()

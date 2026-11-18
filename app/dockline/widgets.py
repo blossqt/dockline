@@ -12,7 +12,7 @@ import webbrowser
 import winreg
 
 from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
@@ -2681,7 +2681,7 @@ class _UsageBarRow(QWidget):
 class _AITile(Tile):
     GROUP = 'AI'
     PROVIDER = ''
-    MIN_WIDTH = 2.6
+    MIN_WIDTH = 1.9
 
     def setup(self):
         self._ticks = 0
@@ -2823,46 +2823,88 @@ class _AITile(Tile):
         top_y = area.center().y() - total_h / 2
         has_icons = any(p is not None for p, _, _ in rows)
         icon_s = round(px * 1.15) if has_icons else 0
-        label_w = round(px * (4.4 if has_icons else 4.0))
-        pct_w = round(px * 2.8)
-        reset_w = round(px * 4.1)
+        icon_col = (icon_s + 4) if has_icons else 0
         ring_d = round(px * 1.18)
 
-        for idx, (provider, label, window) in enumerate(rows[:2]):
+        fm_bold = QFontMetricsF(L.font(px, 600))
+        fm_reg = QFontMetricsF(L.font(px, 400))
+        prepared = []
+        for provider, label, window in rows[:2]:
+            pct, share, left = ai.shown_value(window, show_used=show_used)
+            pct_str = f'{pct}%'
+            reset_str = ai.format_reset(window.get('resets_at'))
+            prepared.append((provider, label, pct_str, reset_str, share, left))
+
+        import math
+        natural_label_w = math.ceil(max((fm_bold.horizontalAdvance(item[1]) for item in prepared), default=0.0)) + 2
+        pct_w = math.ceil(max((fm_bold.horizontalAdvance(item[2]) for item in prepared), default=0.0)) + 2
+        reset_w = math.ceil(max((fm_reg.horizontalAdvance(item[3]) for item in prepared if item[3]), default=0.0))
+        if reset_w > 0:
+            reset_w += 2
+
+        track_col = look.c(look.track)
+        if track_col.alpha() < (64 if look.dark else 52):
+            track_col.setAlpha(64 if look.dark else 52)
+
+        total_w = area.width()
+        for idx, (provider, label, pct_str, reset_str, share, left) in enumerate(prepared):
             y = top_y + idx * (row_h + gap_y)
             x = area.x()
             if has_icons and provider:
                 ai.paint_provider_mark(painter, QRectF(x, y + (row_h - icon_s) / 2, icon_s, icon_s),
                                        provider, look.dark)
-                x += icon_s + 4
-            pct, share, left = ai.shown_value(window, show_used=show_used)
+                x += icon_col
             right = area.right()
-            L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), f'{pct}%', look.c(look.text), px, 600,
+            L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), pct_str, look.c(look.text), px, 600,
                    Qt.AlignRight | Qt.AlignVCenter)
-            avail_mid = (right - pct_w - 3) - x
-            show_reset = avail_mid >= label_w + reset_w + 4
-            reset_right = right - pct_w - 3
-            if show_reset:
-                reset = ai.format_reset(window.get('resets_at'))
-                L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset, look.c(look.sub), px, 400,
-                       Qt.AlignRight | Qt.AlignVCenter)
-                ind_right = reset_right - reset_w - 4
-            else:
-                ind_right = reset_right
-            max_label = max(24.0, ind_right - x)
-            L.text(painter, QRectF(x, y, min(label_w, max_label), row_h), label, look.c(look.text), px, 600,
-                   Qt.AlignLeft | Qt.AlignVCenter)
-            ind_left = x + label_w + 4
+            pct_left = right - pct_w
+
             if style == 'rings':
-                if ind_right - ind_left >= ring_d:
-                    rx = ind_left + (ind_right - ind_left - ring_d) * 0.35
-                    L.ring(painter, QRectF(rx, y + (row_h - ring_d) / 2, ring_d, ring_d), share,
-                           ai.health_color(left, look.dark), look.c(look.track), max(2.2, ring_d * 0.19))
+                # Compact empty space first; keep the usage circle visible at every width
+                avail = pct_left - x
+                min_lbl = min(natural_label_w, round(px * 2.5))
+                has_reset_room = reset_w > 0 and avail >= min_lbl + 5 + ring_d + 5 + reset_w + 5
+                if has_reset_room:
+                    reset_right = pct_left - 5
+                    if reset_str:
+                        L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset_str,
+                               look.c(look.sub), px, 400, Qt.AlignRight | Qt.AlignVCenter)
+                    after_ring_limit = reset_right - reset_w - 5
+                else:
+                    after_ring_limit = pct_left - 5
+
+                room_for_label_and_ring = after_ring_limit - x
+                if room_for_label_and_ring >= ring_d + 22:
+                    lbl_w = min(natural_label_w, room_for_label_and_ring - ring_d - 5)
+                    L.text(painter, QRectF(x, y, lbl_w, row_h), label, look.c(look.text), px, 600,
+                           Qt.AlignLeft | Qt.AlignVCenter)
+                    slack = max(0.0, after_ring_limit - (x + lbl_w + 5 + ring_d))
+                    rx = x + lbl_w + 5 + min(slack * 0.25, 10.0)
+                else:
+                    # Ultra-compact: icon + usage ring + percentage
+                    rx = x + max(0.0, (room_for_label_and_ring - ring_d) / 2.0)
+
+                L.ring(painter, QRectF(rx, y + (row_h - ring_d) / 2, ring_d, ring_d), share,
+                       ai.health_color(left, look.dark), track_col, max(2.2, ring_d * 0.19))
             else:
-                if show_reset and ind_right - ind_left >= 12:
+                avail_mid = (pct_left - 4) - x
+                show_reset = reset_w > 0 and avail_mid >= natural_label_w + reset_w + 6
+                reset_right = pct_left - 4
+                if show_reset:
+                    if reset_str:
+                        L.text(painter, QRectF(reset_right - reset_w, y, reset_w, row_h), reset_str,
+                               look.c(look.sub), px, 400, Qt.AlignRight | Qt.AlignVCenter)
+                    ind_right = reset_right - reset_w - 5
+                else:
+                    ind_right = reset_right
+                lbl_w = min(natural_label_w, max(22.0, ind_right - x))
+                L.text(painter, QRectF(x, y, lbl_w, row_h), label, look.c(look.text), px, 600,
+                       Qt.AlignLeft | Qt.AlignVCenter)
+                ind_left = x + lbl_w + 5
+                if ind_right - ind_left >= 10:
                     bar_h = max(3.5, round(px * 0.36))
                     L.bar(painter, QRectF(ind_left, y + (row_h - bar_h) / 2, ind_right - ind_left, bar_h),
-                          share, ai.health_color(left, look.dark), look.c(look.track))
+                          share, ai.health_color(left, look.dark), track_col)
 
     def _paint_single_window(self, painter: QPainter, area: QRectF, look: L.Look,
                              label: str, window: dict) -> None:
@@ -3174,7 +3216,7 @@ class AILimitsTile(_AITile):
     ID, NAME = 'ai_limits', 'AI Limits'
     ABOUT = 'Two of your AI plans on one tile — Claude, ChatGPT or Gemini — showing how much is left and ' \
             'when each timer resets.'
-    WIDTH = 5.15
+    WIDTH = 4.3
 
     def chosen_rows(self, snap: dict[str, dict]) -> list[tuple[str | None, str, dict]]:
         enabled = self.enabled_providers()
@@ -3224,7 +3266,7 @@ class AILimitsTile(_AITile):
 
 
 class _SingleProviderAITile(_AITile):
-    WIDTH = 4.85
+    WIDTH = 4.55
 
     def paint(self, painter, rect, look):
         snap = self.snapshot()

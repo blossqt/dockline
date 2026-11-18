@@ -856,6 +856,7 @@ class AIUsage(QObject):
         self.home = home
         self.opener = opener
         self._busy = False
+        self._stopped = False
         self._last_poll = 0.0
         self._backoff_until: dict[str, float] = {}
         self._mtimes: dict[str, float] = {}
@@ -949,8 +950,11 @@ class AIUsage(QObject):
             if time.monotonic() - self._last_poll >= 15.0:
                 self.fetch()
 
+    def stop(self) -> None:
+        self._stopped = True
+
     def fetch(self, force: bool = False) -> None:
-        if self.testing or self._busy:
+        if self.testing or self._stopped or self._busy:
             return
         self._busy = True
         self._last_poll = time.monotonic()
@@ -1006,7 +1010,8 @@ class AIUsage(QObject):
     def _run_fetch(self, force: bool) -> None:
         try:
             result = self._collect(force=force)
-            self.changed.emit(result)
+            if not self._stopped:
+                self.changed.emit(result)
         finally:
             self._busy = False
 
