@@ -15,7 +15,8 @@ What it does in the taskbar's place:
 - AI usage trackers (AI Limits, Claude, ChatGPT and Gemini) showing remaining allowance and reset timers from your existing local sign-ins, with live updates as you use them.
 - Settings > Backup exports and imports every setting, pinned shortcuts included.
 - Previews on hover (and on a click on an app with several windows), close above the dock; resting on
-  one shows that window alone (Windows' own live preview). Attention flashing, middle-click or Shift+click for a new window, End task.
+  one shows that window alone (Windows' own live preview). Start or Search covering them closes, so
+  the dock brought up over a full-screen game with Start can switch windows. Attention flashing, middle-click or Shift+click for a new window, End task.
 - Files dragged onto an app open in it; held over an open app, its window comes forward. Programs
   and shortcuts dragged onto the dock are pinned. A hidden dock comes up for a file drag.
 - The input language of the window in front, with the input mode of Chinese, Japanese and Korean

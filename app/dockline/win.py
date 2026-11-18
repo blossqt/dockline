@@ -192,6 +192,43 @@ def shell_in_front() -> bool:
     return bool(hwnd) and _class_name(hwnd) in START_CLASSES
 
 
+# The programs that draw Start, Search and the notification and quick settings panels (Windows 10 and 11)
+SHELL_HOSTS = {'startmenuexperiencehost.exe', 'shellexperiencehost.exe', 'shellhost.exe', 'searchhost.exe',
+               'searchapp.exe', 'searchui.exe'}
+IMMERSIVE_CLASSES = {'Windows.UI.Core.CoreWindow', 'XamlExplorerHostIslandWindow'}
+VK_ESCAPE = 0x1B
+
+
+def window_rect(hwnd) -> tuple[int, int, int, int]:
+    rect = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(rect))
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def shell_over(hwnd) -> int:
+    """Start, Search or another of Windows' own panels is the foreground window and covers hwnd: its
+    window, or 0. Windows keeps those panels in a layer above every program's always-on-top windows,
+    so nothing of the dock's can be shown over them."""
+    front = foreground()
+    if not front or not hwnd or front == hwnd:
+        return 0
+    program = os.path.basename(process_path(window_pid(front))).lower()
+    if program not in SHELL_HOSTS and not (program == 'explorer.exe' and _class_name(front) in IMMERSIVE_CLASSES):
+        return 0
+    a, b = window_rect(front), window_rect(hwnd)
+    overlaps = max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
+    return front if overlaps else 0
+
+
+def dismiss_shell(front) -> bool:
+    """Close Start or the like as Esc does, only while that same window is in front: the key must
+    never reach anything else, such as a game behind it."""
+    if not front or foreground() != front:
+        return False
+    press(VK_ESCAPE)
+    return True
+
+
 # ---------------------------------------------------------------- top-level windows
 
 GWL_EXSTYLE, GWL_STYLE = -20, -16

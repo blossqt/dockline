@@ -308,6 +308,73 @@ class DockTests(Temp):
             self.assertEqual(peeks[-1], (False, 0))
         dock.hide()
 
+    def test_previews_close_start_that_covers_them(self):
+        """Start brought the dock up over a full-screen game and covers the previews: the panel takes
+        the front (Start closes as on a click elsewhere), or, if Windows refuses, Esc goes to Start."""
+        from unittest import mock
+        from dockline import previews
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe'),
+                                       win.Window(102, 'Two', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        tile.refresh()
+        dock.layout().activate()
+        panel = previews.Previews(tile)
+        START = 777
+        state = {'front': START, 'granted': True, 'covers': True}
+        activated, escaped = [], []
+
+        def activate(hwnd):
+            activated.append(hwnd)
+            if state['granted']:
+                state['front'] = hwnd
+
+        with mock.patch.object(win, 'shell_over', lambda hwnd: START if state['covers'] and state['front'] == START else 0), \
+                mock.patch.object(win, 'activate', activate), \
+                mock.patch.object(win, 'foreground', lambda: state['front']), \
+                mock.patch.object(win, 'dismiss_shell', lambda front: escaped.append(front) or True):
+            dock.testing = False                                  # only a real dock clears Start away
+            try:
+                panel.show_for(0)
+                self.assertEqual(activated, [int(panel.winId())])
+                self.assertEqual(escaped, [])                     # the panel came to the front: no key
+                panel.close_now()
+                state.update(front=START, granted=False)
+                activated.clear()
+                panel.show_for(0)
+                self.assertEqual(escaped, [START])                # refused: Esc, to Start alone
+                panel.close_now()
+                state.update(front=START, covers=False)           # Start on another screen
+                activated.clear()
+                escaped.clear()
+                panel.show_for(0)
+                self.assertEqual((activated, escaped), ([], []))
+                panel.close_now()
+            finally:
+                dock.testing = True
+        dock.hide()
+
+    def test_dock_stays_while_previews_are_open_over_a_full_screen_app(self):
+        """Start closed for the previews and the game is in front again: the dock goes once they close."""
+        from unittest import mock
+        dock = self.make()
+        dock.show()
+        open_ = [True]
+        with mock.patch.object(win, 'full_screen_in_front', lambda pid, device=None: True), \
+                mock.patch.object(dock, 'previews_open', lambda: open_[0]), \
+                mock.patch.object(dock, 'slide', lambda coming, then=None: setattr(dock, 'slid', coming)):
+            dock.check_full_screen()
+            self.assertFalse(dock.full_screen)
+            self.assertTrue(dock.full_later.isActive())
+            open_[0] = False
+            dock.check_full_screen()
+            self.assertTrue(dock.full_screen)
+            self.assertFalse(dock.slid)
+        dock.full_watch.stop()
+        dock.full_later.stop()
+        dock.hide()
+
     def test_media_progress_and_jump(self):
         dock = self.make()
         dock.cfg['widgets'] = ['media']
@@ -464,6 +531,40 @@ class WindowsTests(unittest.TestCase):
         layouts = win.keyboards()
         self.assertTrue(layouts)
         self.assertTrue(win.locale_of(layouts[0]))
+
+    def test_only_windows_own_panels_over_the_dock_are_closed(self):
+        """Start, Search and the like are found by the program that draws them, and only where they
+        cover the window asked about; Esc goes only to that same window."""
+        from unittest import mock
+        windows = {
+            1: ('C:\\Windows\\SystemApps\\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\\'
+                'StartMenuExperienceHost.exe', 'Windows.UI.Core.CoreWindow', (560, 200, 1360, 1030)),
+            2: (r'C:\Riot Games\VALORANT\live\ShooterGame\Binaries\Win64\VALORANT-Win64-Shipping.exe',
+                'VALORANTUnrealWindow', (0, 0, 1920, 1080)),
+            3: (r'C:\Windows\explorer.exe', 'XamlExplorerHostIslandWindow', (0, 0, 1920, 1080)),
+            4: (r'C:\Windows\explorer.exe', 'Shell_TrayWnd', (0, 1032, 1920, 1080)),
+            5: (r'C:\Windows\SystemApps\MicrosoftWindows.Client.CBS_cw5n1h2txyewy\SearchHost.exe',
+                'Windows.UI.Core.CoreWindow', (-1600, 100, -400, 900)),         # on the other screen
+        }
+        panel = (700, 850, 1160, 1020)
+        front = [1]
+        presses = []
+        with mock.patch.object(win, 'foreground', lambda: front[0]), \
+                mock.patch.object(win, 'window_pid', lambda hwnd: hwnd), \
+                mock.patch.object(win, 'process_path', lambda pid: windows[pid][0]), \
+                mock.patch.object(win, '_class_name', lambda hwnd: windows[hwnd][1]), \
+                mock.patch.object(win, 'window_rect', lambda hwnd: panel if hwnd == 99 else windows[hwnd][2]), \
+                mock.patch.object(win, 'press', lambda *keys: presses.append(keys)):
+            found = {}
+            for hwnd in windows:
+                front[0] = hwnd
+                found[hwnd] = win.shell_over(99)
+            self.assertEqual(found, {1: 1, 2: 0, 3: 3, 4: 0, 5: 0})
+            front[0] = 1
+            self.assertTrue(win.dismiss_shell(1))
+            front[0] = 2                                      # Start already gone: the game is in front
+            self.assertFalse(win.dismiss_shell(1))
+            self.assertEqual(presses, [(win.VK_ESCAPE,)])
 
     def test_maximised_window_is_not_full_screen(self):
         real_zoomed = win.user32.IsZoomed

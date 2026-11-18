@@ -222,6 +222,21 @@ class Previews(QWidget):
         win.round_corners(int(self.winId()), True)
         self.register_thumbs()
         self.update()
+        if not dock.testing:
+            self.clear_shell()
+
+    def clear_shell(self) -> None:
+        """Start or Search is in front and covers the panel (Start opened to bring the dock up over a
+        full-screen game). Windows keeps those over every always-on-top window, so the panel takes the
+        front instead, which closes them as a click elsewhere does; a game behind then cannot take the
+        pointer back while a window is chosen. If Windows refuses, Esc closes them."""
+        own = int(self.winId())
+        front = win.shell_over(own)
+        if not front:
+            return
+        win.activate(own)
+        if win.foreground() == front:
+            win.dismiss_shell(front)
 
     def box(self, i: int) -> QRect:
         return QRect(PAD + i * (BOX_W + GAP), PAD, BOX_W, BOX_H)

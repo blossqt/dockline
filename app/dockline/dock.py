@@ -150,6 +150,10 @@ class Dock(QWidget):
         self.full_watch = QTimer(self)        # while hidden for a full-screen app: is it still there?
         self.full_watch.setInterval(1000)
         self.full_watch.timeout.connect(self.check_full_screen)
+        self.full_later = QTimer(self)        # a full-screen app in front while previews are open: looked at again
+        self.full_later.setSingleShot(True)
+        self.full_later.setInterval(300)
+        self.full_later.timeout.connect(self.check_full_screen)
         if main:
             self.offer_new_widgets()
             if not testing and not cfg['pins_imported']:
@@ -509,6 +513,9 @@ class Dock(QWidget):
         """Hide for a full-screen app on the dock's screen, and come back once it is gone. Windows'
         own notice is only a hint: it also fires for the desktop itself, which hid the dock for good."""
         full = win.full_screen_in_front(os.getpid(), self.device or None)
+        if full and not self.full_screen and self.previews_open():
+            self.full_later.start()              # Start closed for the previews: the dock goes once they close
+            return
         if full and not self.full_screen:
             self.full_screen = True
             self.full_watch.start()
@@ -519,6 +526,9 @@ class Dock(QWidget):
             self.glass()
             self.slide(True)
             self._poke_ai()
+
+    def previews_open(self) -> bool:
+        return any(tile.ID == 'apps' and tile.previews_visible() for tile in self.tiles)
 
     def shell_notice(self, code: int, hwnd: int) -> None:
         apps = next((t for t in self.tiles if t.ID == 'apps'), None)
