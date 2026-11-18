@@ -737,6 +737,7 @@ class AIUsageTests(Temp):
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtWidgets import QApplication, QPushButton
         from dockline import motion
+        from dockline.card import Card
         from dockline.dock import Dock
 
         real_motion = motion.on
@@ -919,6 +920,7 @@ class AIUsageTests(Temp):
         from PySide6.QtGui import QGuiApplication
         from PySide6.QtWidgets import QApplication, QPushButton
         from dockline import motion
+        from dockline.card import Card
         from dockline.dock import Dock
 
         real_motion = motion.on
@@ -1024,6 +1026,138 @@ class AIUsageTests(Temp):
             tile.grab()
         card.close()
         dock.deleteLater()
+
+    def test_visible_dock_stays_centred_on_rebuild_and_window_open(self):
+        """Rebuilding a visible dock (e.g. changing style/size in Settings) must never collapse resting
+        width to 12 px, and new windows must not force an uncentred layout resize before fit() runs."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication
+        from dockline import motion, win
+        from dockline.dock import Dock
+
+        real_motion = motion.on
+        real_windows = win.app_windows
+        fake_windows = [win.Window(101, 'One', 1, r'C:\a\one.exe')]
+        motion.on = lambda: False
+        win.app_windows = lambda _pid=0: list(fake_windows)
+        try:
+            cfg = Config(None)
+            cfg['autohide'] = True
+            cfg['widgets'] = ['start', 'apps', 'ai_limits', 'clock']
+            dock = Dock(cfg, testing=True)
+            self.assertFalse(dock.isVisible())
+            dock.testing = False
+            dock.ai.stop()
+            screen = QGuiApplication.primaryScreen().geometry()
+            dock.show()
+            dock.place()
+            QApplication.processEvents()
+            full_w = dock.resting.width()
+            self.assertGreater(full_w, 200)
+            self.assertEqual(dock.geometry(), dock.resting)
+
+            # Changing look/size calls apply() -> rebuild() -> place() while dock is visible:
+            # resting width must never collapse to 2 * L.GAP (12 px).
+            cfg['look'] = 'midnight'
+            dock.apply()
+            self.assertGreater(dock.resting.width(), 200)
+            self.assertEqual(dock.geometry(), dock.resting)
+            QApplication.processEvents()
+            self.assertEqual(dock.geometry(), dock.resting)
+
+            # Opening new windows increases AppsTile.sizeHint; Qt's layout must NOT resize the top-level
+            # Dock window at its old x before fit_later runs.
+            before = QRect(dock.geometry())
+            fake_windows.extend([
+                win.Window(102, 'Two', 2, r'C:\b\two.exe'),
+                win.Window(103, 'Three', 3, r'C:\c\three.exe'),
+            ])
+            apps = next(t for t in dock.tiles if t.ID == 'apps')
+            apps.refresh()
+            dock.fit_later.stop()
+            QApplication.processEvents()
+            self.assertEqual(dock.geometry(), before)
+
+            # Once fit() runs, the dock widens and re-centres cleanly.
+            dock.fit()
+            self.assertGreater(dock.geometry().width(), before.width())
+            self.assertEqual(dock.geometry(), dock.resting)
+            self.assertAlmostEqual(dock.geometry().center().x(), dock.band.center().x(), delta=2)
+
+            dock.testing = True
+            dock.stop()
+            dock.close()
+            dock.deleteLater()
+            QApplication.processEvents()
+        finally:
+            motion.on = real_motion
+            win.app_windows = real_windows
+
+    def test_open_cards_recentre_and_shrink_on_style_and_stopwatch_changes(self):
+        """Switching AI widget style re-centres the open card over the resized tile, and Stopwatch
+        laps/reset grow and shrink the open card upward from the dock."""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QGuiApplication
+        from PySide6.QtWidgets import QApplication, QPushButton
+        from dockline import motion
+        from dockline.card import Card
+        from dockline.dock import Dock
+
+        real_motion = motion.on
+        motion.on = lambda: False
+        try:
+            cfg = Config(None)
+            cfg['autohide'] = True
+            cfg['widgets'] = ['ai_limits', 'stopwatch']
+            dock = Dock(cfg, testing=True)
+            dock.testing = False
+            dock.ai.stop()
+            screen = QGuiApplication.primaryScreen().geometry()
+            dock.show()
+            dock.place()
+            QApplication.processEvents()
+
+            ai_tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+            ai_tile.click(ai_tile.rect().center())
+            card = ai_tile.card
+            QApplication.processEvents()
+            toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+            toggle.click()
+            bars_btn = next(b for b in card.findChildren(QPushButton) if b.text() == 'Bars')
+            bars_btn.click()
+            QApplication.processEvents()
+            tile_mid = ai_tile.mapToGlobal(ai_tile.rect().center()).x()
+            self.assertAlmostEqual(card.geometry().center().x(), tile_mid, delta=3)
+            card.close()
+            QApplication.processEvents()
+
+            Card.closed_at = 0.0
+            sw_tile = next(t for t in dock.tiles if t.ID == 'stopwatch')
+            sw_tile.click(sw_tile.rect().center())
+            sw_card = sw_tile.card
+            QApplication.processEvents()
+            base_h = sw_card.height()
+            base_bottom = sw_card.geometry().bottom()
+            sw_tile.toggle()
+            sw_tile.lap()
+            sw_tile.lap()
+            QApplication.processEvents()
+            self.assertGreater(sw_card.height(), base_h)
+            self.assertEqual(sw_card.geometry().bottom(), base_bottom)
+            sw_tile.reset()
+            QApplication.processEvents()
+            self.assertEqual(sw_card.height(), base_h)
+            self.assertEqual(sw_card.geometry().bottom(), base_bottom)
+
+            sw_card.close()
+            dock.testing = True
+            dock.stop()
+            dock.close()
+            dock.deleteLater()
+            QApplication.processEvents()
+        finally:
+            motion.on = real_motion
 
 
 if __name__ == '__main__':

@@ -1806,7 +1806,7 @@ class MediaTile(Tile):
                 self.empty.setVisible(not sessions)
                 self.carousel.setVisible(bool(sessions))
                 if self.card is not None:
-                    self.card.adjustSize()
+                    self.card.refit()
             except RuntimeError:
                 self.carousel = None
 
@@ -2312,8 +2312,11 @@ class StopwatchTile(Tile):
             layout = self.lap_list.layout()
             while layout.count():
                 item = layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
+                old_w = item.widget()
+                if old_w is not None:
+                    old_w.hide()
+                    old_w.setParent(None)
+                    old_w.deleteLater()
             previous = 0.0
             for number, total in reversed(list(enumerate(self.laps, 1))):
                 index = number - 1
@@ -2323,7 +2326,7 @@ class StopwatchTile(Tile):
                 layout.addWidget(row)
             self.lap_list.setVisible(bool(self.laps))
             if self.card:
-                self.card.adjustSize()
+                self.card.refit()
         except RuntimeError:
             self.lap_list = None
 
@@ -2570,6 +2573,12 @@ class WeatherTile(Tile):
         self.count = 0
         self.dock.weather.changed.connect(self.weather_changed)
         self.fetch()
+
+    def retire(self):
+        try:
+            self.dock.weather.changed.disconnect(self.weather_changed)
+        except (RuntimeError, TypeError):
+            pass
 
     def weather_changed(self, _):
         self.update()

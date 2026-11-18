@@ -100,6 +100,7 @@ class Dock(QWidget):
         self.testing = testing
         self.main = main                      # the main display's dock: widgets, Settings, the taskbar
         self.target_screen = screen or QGuiApplication.primaryScreen()
+        self._screen_connected = False
         self.multi = False                    # docks on more than one display
         self.others: list = []                # the other displays' docks (on the main one)
         self.tucked = False                   # auto-hidden, beyond the screen's edge
@@ -126,6 +127,7 @@ class Dock(QWidget):
         self.drag_offset = 0
         self.rest: dict = {}           # each widget's place in the row while one is dragged
         self.row = QHBoxLayout(self)
+        self.row.setSizeConstraint(QHBoxLayout.SizeConstraint.SetNoConstraint)
         self.row.setSpacing(L.GAP)
         self.row.setContentsMargins(L.GAP, L.GAP, L.GAP, L.GAP)
         self.ticker = QTimer(self)
@@ -235,14 +237,19 @@ class Dock(QWidget):
     def rebuild(self) -> None:
         while self.row.count():
             item = self.row.takeAt(0)
-            if item.widget():
-                if hasattr(item.widget(), 'retire'):
-                    item.widget().retire()
-                item.widget().deleteLater()
+            widget = item.widget()
+            if widget is not None:
+                if hasattr(widget, 'retire'):
+                    widget.retire()
+                widget.hide()
+                widget.setParent(None)
+                widget.deleteLater()
         keys = self.cfg['widgets'] if self.main else SECOND_WIDGETS
         self.tiles = [REGISTRY[key](self) for key in keys if key in REGISTRY]
         for tile in self.tiles:
             self.row.addWidget(tile, 1 if tile.STRETCH else 0)
+            tile.setVisible(True)
+        self.relayout()
         self.fit_soon()
         if self.picker is not None:
             self.picker.refresh()
@@ -276,6 +283,7 @@ class Dock(QWidget):
             self.start_guard()
         win.user32.RegisterShellHookWindow(hwnd)     # the taskbar's notices: windows coming, going, flashing
         self.target_screen.geometryChanged.connect(self.screen_changed)
+        self._screen_connected = True
         self.peek.start()
         if self.autohide():                          # shown for a moment at start, then tucked away
             self.away_since = time.monotonic() + 1.5
@@ -286,6 +294,15 @@ class Dock(QWidget):
         self.ticker.stop()
         self.keeper.stop()
         self.peek.stop()
+        self.full_watch.stop()
+        self.place_soon.stop()
+        self.fit_later.stop()
+        if self._screen_connected and self.screen_alive():
+            try:
+                self.target_screen.geometryChanged.disconnect(self.screen_changed)
+            except (RuntimeError, TypeError):
+                pass
+            self._screen_connected = False
         if self.appbar is not None:
             self.appbar.remove()
         if not self.testing:
@@ -652,11 +669,12 @@ class Dock(QWidget):
         monitor off brings the full dock to the one left, and back once the monitor returns."""
         if screen is self.target_screen and self.screen_alive():
             return
-        if self.screen_alive():
+        if self._screen_connected and self.screen_alive():
             try:
                 self.target_screen.geometryChanged.disconnect(self.screen_changed)
             except (RuntimeError, TypeError):
                 pass
+        self._screen_connected = False
         if self.appbar is not None:
             self.appbar.remove()
         self.target_screen = screen
@@ -666,6 +684,7 @@ class Dock(QWidget):
         if self.testing:
             return
         screen.geometryChanged.connect(self.screen_changed)
+        self._screen_connected = True
         self.full_screen = False
         self.full_watch.stop()
         self.tucked = False
@@ -784,10 +803,12 @@ class Dock(QWidget):
 
     def mouseReleaseEvent(self, event):
         if self.moving:
-            screen = self.target_screen.geometry()
-            top = event.globalPosition().y() < screen.center().y()
-            self.cfg['edge'] = 'top' if top else 'bottom'
-            self.cfg.save()
+            screen_obj = self.target_screen if self.screen_alive() else QGuiApplication.primaryScreen()
+            if screen_obj is not None:
+                screen = screen_obj.geometry()
+                top = event.globalPosition().y() < screen.center().y()
+                self.cfg['edge'] = 'top' if top else 'bottom'
+                self.cfg.save()
             self.moving = False
             self.place()
         self._drag_from = None
@@ -967,9 +988,10 @@ class Dock(QWidget):
 
     def settings_imported(self) -> None:
         """Settings were taken from an export: everything they cover, applied now."""
-        for what in ('look', 'edge', 'opacity', 'clock', 'ai', 'weather', 'autohide', 'taskbar', 'startup'):
+        for what in ('look', 'size', 'edge', 'opacity', 'clock', 'ai', 'weather', 'autohide', 'taskbar', 'startup'):
             self.changed(what)
         self.rebuild()
+        self.place()
         for tile in self.tiles:
             if tile.ID == 'apps':
                 tile.order = list(self.cfg['app_order'])

@@ -109,16 +109,18 @@ class Card(QWidget):
             self.grow()
 
     def refit(self) -> None:
-        """Content inside an open card grew or shrank: resize and keep it 8 px clear of the dock."""
+        """Content inside an open card grew or shrank: resize and keep it centred 8 px clear of the dock."""
         h = self._desired_height()
         if not self.isVisible() or self.tile.dock.testing:
             self.resize(self.width(), h)
             return
         dock = self.tile.dock
+        top_left = self.tile.mapToGlobal(QPoint(0, 0))
         screen = (dock.screen() or QGuiApplication.primaryScreen()).geometry()
         max_h = max(120, screen.height() - dock.height() - 2 * L.MARGIN - 16)
         h = min(h, max_h)
-        x = max(screen.left() + L.MARGIN, min(self.x(), screen.right() - L.MARGIN - self.width()))
+        wanted_x = top_left.x() + self.tile.width() // 2 - self.width() // 2
+        x = max(screen.left() + L.MARGIN, min(wanted_x, screen.right() - L.MARGIN - self.width()))
         y = self._anchor_y(h, screen)
         self._placing = True
         try:

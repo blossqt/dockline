@@ -73,7 +73,7 @@ def _render(folder: Path, offscreen: bool) -> int:
                         card = tile.card
                         if card is None:
                             raise RuntimeError('no card opened')
-                        card.adjustSize()
+                        card.refit()
                         card.grab().save(str(folder / f'card-{name}-{tile.ID}.png'))
                         card.close()
                     except Exception:

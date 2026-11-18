@@ -210,7 +210,10 @@ class Previews(QWidget):
         tile = self.strip.rects()[index] if index < len(self.strip.rects()) else QRectF(0, 0, 40, 40)
         centre = self.strip.mapToGlobal(QPoint(round(tile.center().x()), 0)).x()
         dock = self.strip.dock
-        screen = dock.screen().geometry()
+        screen_obj = dock.screen() or (dock.target_screen if dock.screen_alive() else QGuiApplication.primaryScreen())
+        if screen_obj is None:
+            return
+        screen = screen_obj.geometry()
         x = max(screen.left() + 8, min(centre - width // 2, screen.right() - width - 8))
         top = dock.mapToGlobal(QPoint(0, 0)).y()
         y = top + dock.height() + ABOVE if dock.edge == 'top' else top - ABOVE - height
