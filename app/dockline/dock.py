@@ -518,6 +518,7 @@ class Dock(QWidget):
             self.full_watch.stop()
             self.glass()
             self.slide(True)
+            self._poke_ai()
 
     def shell_notice(self, code: int, hwnd: int) -> None:
         apps = next((t for t in self.tiles if t.ID == 'apps'), None)
@@ -530,6 +531,10 @@ class Dock(QWidget):
             apps.window_changed()
         elif code in (win.HSHELL_WINDOWCREATED, win.HSHELL_WINDOWDESTROYED, win.HSHELL_REDRAW):
             apps.window_changed()
+
+    def _poke_ai(self, max_age: float = 20.0) -> None:
+        if self.main and not self.testing and any(t.GROUP == 'AI' for t in self.tiles):
+            self.ai.poke(max_age=max_age)
 
     def _on_low_allowance(self, _provider: str, _label: str, _left: float) -> None:
         """An active AI allowance dropped to 15% left or less: bring a tucked dock out briefly."""
@@ -547,6 +552,7 @@ class Dock(QWidget):
         self.away_since = time.monotonic() + 2 if self.autohide() else None
         if not self.isVisible() or self.geometry() != self.resting:
             self.slide(True)
+        self._poke_ai()
         for other in self.others:
             other.come_back()
 
@@ -629,6 +635,7 @@ class Dock(QWidget):
                 self.tucked = False
                 self.away_since = None
                 self.slide(True)
+                self._poke_ai()
             return
         now = time.monotonic()
         if self.busy() or not self.isVisible():
@@ -1014,6 +1021,8 @@ class Dock(QWidget):
             for tile in self.tiles:
                 tile.update()
         elif what in ('clock', 'ai'):
+            if what == 'ai' and self.main:
+                self.ai.configure()
             for tile in self.tiles:
                 tile.update()
         elif what == 'weather':

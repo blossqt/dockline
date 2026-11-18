@@ -1159,6 +1159,263 @@ class AIUsageTests(Temp):
         finally:
             motion.on = real_motion
 
+    def test_live_activity_watching_codex_instant_and_targeted_polling(self):
+        import json
+        import os
+        import time
+        from dockline import ai
+
+        home = self.folder / 'live-home'
+        (home / '.claude' / 'projects' / 'demo').mkdir(parents=True)
+        (home / '.claude' / '.credentials.json').write_text(json.dumps({
+            'claudeAiOauth': {'accessToken': 'claude-tok', 'subscriptionType': 'pro'}
+        }), 'utf-8')
+        (home / '.gemini' / 'antigravity-cli' / 'brain' / 'conv-1' / '.system_generated' / 'logs').mkdir(parents=True)
+        (home / '.gemini' / 'oauth_creds.json').write_text(json.dumps({
+            'access_token': 'gem-tok'
+        }), 'utf-8')
+        codex_day = home / '.codex' / 'sessions' / '2026' / '11' / '18'
+        codex_day.mkdir(parents=True)
+
+        claude_used = [20.0]
+        gem_rem = [0.80]
+        calls: list[str] = []
+        reset_future = time.time() + 3600
+
+        def fake_opener(url, method='GET', headers=None, body=None, timeout=8):
+            if 'anthropic.com' in url:
+                calls.append('claude')
+                return {'five_hour': {'utilization': claude_used[0], 'resets_at': reset_future}}
+            if 'retrieveUserQuota' in url:
+                calls.append('gemini')
+                return {'buckets': [{'modelId': 'gemini-2.5-pro', 'remainingFraction': gem_rem[0],
+                                     'resetTime': reset_future}]}
+            return {}
+
+        cfg = Config(None)
+        self.assertEqual(cfg['ai_refresh'], 'live')
+        self.assertEqual(ai.poll_interval_for('live', card_open=False), 45)
+        self.assertEqual(ai.poll_interval_for('live', card_open=True), 20)
+        self.assertEqual(ai.poll_interval_for('30s', card_open=False), 30)
+        self.assertEqual(ai.format_age(100.0, now=105.0), 'Updated just now')
+        self.assertEqual(ai.format_age(100.0, now=123.0), 'Updated 20s ago')
+
+        coord = ai.AIUsage(cfg, testing=False, home=home, opener=fake_opener)
+        dispatched: list[tuple[set[str], float | None]] = []
+
+        def sync_fetch(force=False, providers=None, now_mono=None):
+            dispatched.append((set(providers or ()), now_mono))
+            coord.refresh_sync(force=force, providers=providers, now_mono=now_mono)
+            coord.changed.emit(dict(coord.latest))
+
+        coord.fetch = sync_fetch
+        coord.refresh_sync(now_mono=10.0)
+        calls.clear()
+        dispatched.clear()
+
+        # 1. Local Codex rollout log updates ChatGPT allowance immediately with zero network traffic
+        rollout = codex_day / 'rollout-live.jsonl'
+        rollout.write_text(json.dumps({
+            'timestamp': time.time(),
+            'type': 'event_msg',
+            'payload': {
+                'type': 'token_count',
+                'rate_limits': {
+                    'plan_type': 'plus',
+                    'primary': {'used_percent': 41.0, 'resets_at': reset_future},
+                },
+            },
+        }) + '\n', 'utf-8')
+        os.utime(rollout, (time.time() + 2, time.time() + 2))
+        changed_events = []
+        coord.changed.connect(lambda snap: changed_events.append(snap))
+        coord.watch_files(now_mono=15.0)
+        self.assertTrue(coord.latest['chatgpt']['connected'])
+        self.assertEqual(coord.latest['chatgpt']['windows'][0]['used'], 41.0)
+        self.assertGreaterEqual(len(changed_events), 1)
+        self.assertEqual(calls, [])     # no Claude or Gemini HTTP requests made
+
+        # 2. Claude Code turn writes a session JSONL -> debounced, then polls ONLY Claude (not Gemini)
+        claude_used[0] = 35.0
+        turn_file = home / '.claude' / 'projects' / 'demo' / 'session-1.jsonl'
+        turn_file.write_text('{"type":"assistant"}\n', 'utf-8')
+        os.utime(turn_file, (time.time() + 5, time.time() + 5))
+        coord.watch_files(now_mono=24.0)
+        self.assertEqual(calls, [])     # still debouncing at t=24.0 (0s quiet)
+        coord.step(now_mono=26.0)       # 2.0s quiet (>= 1.5s debounce) and >= 12s since t=10.0 poll
+        self.assertEqual(calls, ['claude'])
+        self.assertEqual(coord.latest['claude']['windows'][0]['used'], 35.0)
+
+        # 3. Antigravity CLI transcript update polls ONLY Gemini once quiet
+        calls.clear()
+        gem_rem[0] = 0.62
+        agy_log = home / '.gemini' / 'antigravity-cli' / 'brain' / 'conv-1' / '.system_generated' / 'logs' / 'transcript.jsonl'
+        agy_log.write_text('{"step_index":1}\n', 'utf-8')
+        os.utime(agy_log, (time.time() + 10, time.time() + 10))
+        coord.watch_files(now_mono=28.0)
+        self.assertEqual(calls, [])
+        coord.step(now_mono=30.0)
+        self.assertEqual(calls, ['gemini'])
+        self.assertEqual(coord.latest['gemini']['windows'][0]['used'], 38.0)
+
+        # 4. Expired reset window triggers automatic rollover refresh
+        calls.clear()
+        claude_used[0] = 2.0
+        coord.latest['claude']['windows'][0]['resets_at'] = time.time() - 1.0
+        coord.step(now_mono=40.0)
+        self.assertIn('claude', calls)
+        self.assertEqual(coord.latest['claude']['windows'][0]['used'], 2.0)
+        coord.stop()
+
+    def test_updates_mode_selector_and_open_card_live_connection(self):
+        import time
+        from PySide6.QtWidgets import QApplication, QMenu, QPushButton
+        from dockline import motion
+        from dockline.dock import Dock
+
+        real_motion = motion.on
+        motion.on = lambda: False
+        try:
+            cfg = Config(None)
+            cfg['widgets'] = ['ai_limits']
+            dock = Dock(cfg, testing=True)
+            tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+            tile.click(tile.rect().center())
+            card = tile.card
+            self.assertIn('Live', tile._mode_sub.text())
+
+            toggle = next(b for b in card.findChildren(QPushButton) if 'Settings' in b.text())
+            toggle.click()
+            for label, mode_key in (('30s', '30s'), ('1m', '1m'), ('5m', '5m'), ('Live', 'live')):
+                btn = next(b for b in card.findChildren(QPushButton) if b.text() == label)
+                btn.click()
+                self.assertEqual(cfg['ai_refresh'], mode_key)
+
+            # Right-click menu offers 'Live updates' shortcut when switched away from live
+            tile.set_refresh_mode('5m')
+            menu = QMenu()
+            tile.menu(menu, tile.rect().center())
+            actions = [a.text() for a in menu.actions() if a.text()]
+            self.assertIn('Live updates', actions)
+            next(a for a in menu.actions() if a.text() == 'Live updates').trigger()
+            self.assertEqual(cfg['ai_refresh'], 'live')
+            from dockline.card import Card
+            card.close()
+            Card.closed_at = 0.0
+
+            # Dynamic card connection: opening card while unconnected then receiving live data populates rows
+            dock.testing = False
+            dock.ai.stop()
+            dock.ai.testing = False
+            dock.ai.latest = {
+                p: {'connected': False, 'signed_in': False, 'plan': '', 'windows': [], 'updated_at': None, 'error': ''}
+                for p in ('claude', 'chatgpt', 'gemini')
+            }
+            tile.click(tile.rect().center())
+            card = tile.card
+            self.assertIsNotNone(card)
+            QApplication.processEvents()
+            self.assertEqual(len(tile._card_rows), 0)
+
+            dock.ai.latest['claude'] = {
+                'connected': True, 'signed_in': True, 'plan': 'Pro',
+                'windows': [{'key': 'session', 'label': 'Session', 'used': 24.0, 'resets_at': time.time() + 3600}],
+                'updated_at': time.time(), 'error': '',
+            }
+            dock.ai.changed.emit(dict(dock.ai.latest))
+            QApplication.processEvents()
+            self.assertEqual(len(tile._card_rows), 1)
+
+            card.close()
+            dock.testing = True
+            dock.close()
+            dock.deleteLater()
+            QApplication.processEvents()
+        finally:
+            motion.on = real_motion
+
+    def test_gemini_weekly_summary_and_circular_card_gauges(self):
+        from PySide6.QtCore import QRectF
+        from dockline import ai, look as L
+        from dockline.card import Card
+        from dockline.dock import Dock
+
+        seen_uas = []
+
+        def fake_summary_opener(url, method='GET', headers=None, body=None, timeout=8):
+            seen_uas.append((headers or {}).get('User-Agent', ''))
+            if 'loadCodeAssist' in url:
+                return {'cloudaicompanionProject': 'agy-proj-weekly'}
+            if 'retrieveUserQuotaSummary' in url:
+                return {
+                    'groups': [
+                        {
+                            'displayName': 'Gemini Models',
+                            'buckets': [
+                                {'bucketId': 'gemini-weekly', 'window': 'weekly',
+                                 'remainingFraction': 0.89, 'resetTime': '2027-01-22T00:00:00Z'},
+                                {'bucketId': 'gemini-5h', 'window': '5h',
+                                 'remainingFraction': 0.84, 'resetTime': '2027-01-15T10:00:00Z'},
+                            ],
+                        },
+                        {
+                            'displayName': 'Claude and GPT models',
+                            'buckets': [
+                                {'bucketId': '3p-weekly', 'window': 'weekly',
+                                 'remainingFraction': 0.95, 'resetTime': '2027-01-22T00:00:00Z'},
+                                {'bucketId': '3p-5h', 'window': '5h',
+                                 'remainingFraction': 1.0, 'resetTime': '2027-01-15T12:00:00Z'},
+                            ],
+                        },
+                    ]
+                }
+            return {}
+
+        empty_home = self.folder / 'agy-weekly-home'
+        empty_home.mkdir()
+        state = ai.fetch_gemini(
+            home=empty_home,
+            opener=fake_summary_opener,
+            cred_reader=lambda: [('gemini:antigravity', 'agy-weekly-tok', None, 100.0)],
+        )
+        self.assertTrue(state['connected'])
+        self.assertEqual(state['plan'], 'Antigravity')
+        self.assertTrue(any('hub/2.' in ua or 'acp/' in ua for ua in seen_uas))
+        self.assertEqual(
+            [(w['label'], w['used']) for w in state['windows']],
+            [('Session', 16.0), ('Weekly', 11.0), ('Claude 5h', 0.0), ('Claude Wk', 5.0)],
+        )
+
+        # Open AI Limits card and verify each window renders as a circular progress ring in a horizontal grid
+        Card.closed_at = 0.0
+        cfg = Config(None)
+        cfg['ai_enabled'] = ['claude', 'gemini']
+        cfg['widgets'] = ['ai_limits']
+        dock = Dock(cfg, testing=True)
+        tile = next(t for t in dock.tiles if t.ID == 'ai_limits')
+        tile.click(tile.rect().center())
+        card = tile.card
+        self.assertIsNotNone(card)
+        # 2 Claude windows + 4 Gemini Antigravity windows = 6 circular ring cells
+        self.assertEqual(len(tile._card_rows), 6)
+
+        real_ring = L.ring
+        drawn_rings = []
+
+        def spy_ring(painter, rect, *rest):
+            drawn_rings.append(QRectF(rect))
+            return real_ring(painter, rect, *rest)
+
+        L.ring = spy_ring
+        try:
+            card.grab()
+        finally:
+            L.ring = real_ring
+        self.assertEqual(len(drawn_rings), 6)
+
+        card.close()
+        dock.deleteLater()
+
 
 if __name__ == '__main__':
     unittest.main()

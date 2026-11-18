@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import datetime as dt
+import gzip
 import json
 import math
 import os
@@ -22,7 +23,7 @@ import urllib.request
 from ctypes import wintypes
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QFileSystemWatcher, QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
 
 from .config import folder
@@ -46,7 +47,7 @@ INFO = {
         'name': 'Gemini',
         'short': 'Gemini',
         'title': 'Gemini Usage',
-        'hint': 'Sign in with Gemini CLI on this PC to show your Pro and Flash quotas.',
+        'hint': 'Sign in with Gemini CLI or Antigravity on this PC to show your session and weekly quotas.',
     },
 }
 
@@ -54,14 +55,42 @@ CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 CHATGPT_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 GEMINI_LOAD_URL = 'https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist'
 GEMINI_QUOTA_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota'
+GEMINI_SUMMARY_URL = 'https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary'
 ANTIGRAVITY_LOAD_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist'
 ANTIGRAVITY_QUOTA_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota'
+ANTIGRAVITY_SUMMARY_URL = 'https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary'
+ANTIGRAVITY_UA = 'antigravity/hub/2.24.0'
 
-POLL_EVERY = 300        # seconds between background network refreshes
-WATCH_EVERY = 15        # seconds between local credential/session mtime checks
-RATE_LIMIT_WAIT = 600   # seconds to back off if a provider answers HTTP 429
+REFRESH_MODES = ('live', '30s', '1m', '5m')
+REFRESH_SECONDS = {
+    'live': 45,         # background network sync in Live mode (plus local session watching)
+    '30s': 30,          # 30-second background polling
+    '1m': 60,           # 1-minute background polling
+    '5m': 300,          # 5-minute background polling
+}
+
+POLL_EVERY = 45         # default seconds between background network refreshes
+CARD_POLL_EVERY = 20    # seconds between refreshes while an AI popup card is open
+WATCH_EVERY = 2         # seconds between local credential/session activity checks
+LIVE_DEBOUNCE = 1.5     # quiet seconds after local file activity before polling
+LIVE_MAX_WAIT = 4.0     # max seconds to wait during continuous streaming before polling
+MIN_LIVE_GAP = 12.0     # minimum seconds between automatic live polls per provider
+RATE_LIMIT_WAIT = 120   # default seconds to back off if a provider answers HTTP 429
 LOW_THRESHOLD = 15.0    # warn once per reset window when remaining allowance drops to or below 15%
 CREATE_NO_WINDOW = 0x08000000
+
+
+def normalize_refresh_mode(value) -> str:
+    return value if value in REFRESH_SECONDS else 'live'
+
+
+def poll_interval_for(mode: str | None, card_open: bool = False) -> int:
+    norm = normalize_refresh_mode(mode)
+    base = REFRESH_SECONDS[norm]
+    if card_open:
+        return min(base, CARD_POLL_EVERY if norm != '5m' else 30)
+    return base
+
 
 GEMINI_CRED_TARGETS = (
     'gemini-cli-oauth',
@@ -78,7 +107,9 @@ class _HttpStatus(Exception):
 
 
 class _RateLimited(Exception):
-    pass
+    def __init__(self, retry_after: float | None = None):
+        super().__init__('HTTP 429')
+        self.retry_after = retry_after
 
 
 # ---------------------------------------------------------------- time & percentages
@@ -171,13 +202,29 @@ def format_reset_long(resets_at: float | None, clock24: bool = False, now: float
     return f'Resets {when:%a, %b} {when.day} · {clock}'
 
 
+def format_reset_card(resets_at: float | None, now: float | None = None, idle: bool = False) -> str:
+    """Compact reset text beneath circular progress gauges in popup cards."""
+    if resets_at is None:
+        return 'Next msg' if idle else ''
+    current = time.time() if now is None else now
+    delta = resets_at - current
+    if delta <= 0:
+        return 'Now'
+    if delta < 86400:
+        return format_reset(resets_at, current)
+    when = dt.datetime.fromtimestamp(resets_at)
+    return f'{when:%a, %b} {when.day}'
+
+
 def format_age(updated_at: float | None, now: float | None = None) -> str:
     if updated_at is None:
         return ''
     current = time.time() if now is None else now
     age = max(0.0, current - updated_at)
-    if age < 45:
+    if age < 10:
         return 'Updated just now'
+    if age < 60:
+        return f'Updated {int(age // 5) * 5}s ago'
     if age < 3600:
         return f'Updated {max(1, round(age / 60))}m ago'
     return f'Updated {max(1, round(age / 3600))}h ago'
@@ -338,17 +385,28 @@ def _empty_state(signed_in: bool = False, error: str = '') -> dict:
 def _http_json(url: str, method: str = 'GET', headers: dict | None = None,
                body: dict | None = None, timeout: int = 8) -> dict:
     payload = json.dumps(body).encode('utf-8') if body is not None else None
-    req_headers = {'Accept': 'application/json', **(headers or {})}
+    req_headers = {'Accept': 'application/json', 'Accept-Encoding': 'gzip', **(headers or {})}
     if payload is not None:
         req_headers.setdefault('Content-Type', 'application/json')
     request = urllib.request.Request(url, data=payload, headers=req_headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            raw = response.read().decode('utf-8', errors='replace')
+            raw_bytes = response.read()
+            enc = (response.headers.get('Content-Encoding') or '').lower() if response.headers else ''
+            if 'gzip' in enc or raw_bytes[:2] == b'\x1f\x8b':
+                raw_bytes = gzip.decompress(raw_bytes)
+            raw = raw_bytes.decode('utf-8', errors='replace')
             return json.loads(raw) if raw.strip() else {}
     except urllib.error.HTTPError as err:
         if err.code == 429:
-            raise _RateLimited() from None
+            retry = None
+            try:
+                hdr = err.headers.get('Retry-After') if err.headers else None
+                if hdr is not None:
+                    retry = max(15.0, min(600.0, float(hdr)))
+            except (TypeError, ValueError):
+                retry = None
+            raise _RateLimited(retry) from None
         raise _HttpStatus(err.code) from None
 
 
@@ -433,17 +491,67 @@ def parse_codex_session_limits(rate_limits: dict, now: float | None = None) -> t
     return parse_chatgpt_usage(rate_limits, now=now)
 
 
+def _newest_subdirs(folder_path: Path, limit: int = 3) -> list[Path]:
+    try:
+        dirs = [entry for entry in os.scandir(folder_path) if entry.is_dir(follow_symlinks=False)]
+    except OSError:
+        return []
+
+    def mtime_of(entry: os.DirEntry) -> float:
+        try:
+            return entry.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            return 0.0
+
+    if dirs and all(d.name.isdigit() for d in dirs):
+        dirs.sort(key=lambda e: (e.name, mtime_of(e)), reverse=True)
+    else:
+        dirs.sort(key=lambda e: (mtime_of(e), e.name), reverse=True)
+    return [Path(d.path) for d in dirs[:limit]]
+
+
+def _newest_files_in(folder_path: Path, suffix: str = '', limit: int = 4) -> list[tuple[float, Path]]:
+    out: list[tuple[float, Path]] = []
+    try:
+        for entry in os.scandir(folder_path):
+            if entry.is_file(follow_symlinks=False) and (not suffix or entry.name.endswith(suffix)):
+                try:
+                    out.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry.path)))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    out.sort(key=lambda item: item[0], reverse=True)
+    return out[:limit]
+
+
+def _newest_codex_rollouts(sessions_dir: Path, limit: int = 4) -> list[tuple[float, Path]]:
+    """Find the most recent Codex rollout JSONL files without scanning entire historic archives."""
+    if not sessions_dir.is_dir():
+        return []
+    candidates: list[tuple[float, Path]] = _newest_files_in(sessions_dir, '.jsonl', limit)
+    for lvl1 in _newest_subdirs(sessions_dir, 2):
+        candidates.extend(_newest_files_in(lvl1, '.jsonl', limit))
+        for lvl2 in _newest_subdirs(lvl1, 2):
+            candidates.extend(_newest_files_in(lvl2, '.jsonl', limit))
+            for lvl3 in _newest_subdirs(lvl2, 3):
+                candidates.extend(_newest_files_in(lvl3, '.jsonl', limit))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    seen: set[Path] = set()
+    ordered: list[tuple[float, Path]] = []
+    for mtime, path in candidates:
+        if path not in seen:
+            seen.add(path)
+            ordered.append((mtime, path))
+            if len(ordered) >= limit:
+                break
+    return ordered
+
+
 def latest_codex_session_limits(sessions_dir: Path) -> tuple[list[dict], str, float | None]:
     """Read the newest token_count rate_limits from local Codex rollout logs without network traffic."""
-    if not sessions_dir.is_dir():
-        return [], '', None
-    try:
-        files = sorted(sessions_dir.rglob('*.jsonl'), key=lambda p: p.stat().st_mtime, reverse=True)[:4]
-    except OSError:
-        return [], '', None
-    for file in files:
+    for mtime, file in _newest_codex_rollouts(sessions_dir, limit=4):
         try:
-            mtime = file.stat().st_mtime
             with file.open('rb') as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
@@ -466,6 +574,63 @@ def latest_codex_session_limits(sessions_dir: Path) -> tuple[list[dict], str, fl
                     stamp = parse_time(event.get('timestamp')) or mtime
                     return windows, plan, stamp
     return [], '', None
+
+
+def parse_gemini_quota_summary(data: dict) -> list[dict]:
+    """Parse Antigravity / Cloud Code retrieveUserQuotaSummary groups into 5-hour session and weekly windows."""
+    if not isinstance(data, dict):
+        return []
+    groups = data.get('groups')
+    if not isinstance(groups, list) or not groups:
+        return []
+    gem_5h = gem_wk = third_5h = third_wk = None
+    extras: list[dict] = []
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        gname = str(group.get('displayName') or '').strip()
+        glow = gname.lower()
+        buckets = group.get('buckets')
+        if not isinstance(buckets, list):
+            continue
+        for item in buckets:
+            if not isinstance(item, dict) or item.get('remainingFraction') is None:
+                continue
+            try:
+                rem = max(0.0, min(1.0, float(item['remainingFraction'])))
+            except (TypeError, ValueError):
+                continue
+            used = round((1.0 - rem) * 100.0, 1)
+            resets_at = parse_time(item.get('resetTime'))
+            bid = str(item.get('bucketId') or '').strip().lower()
+            wkind = str(item.get('window') or '').strip().lower()
+            dname = str(item.get('displayName') or '').strip()
+            is_weekly = 'week' in bid or 'week' in wkind or 'week' in dname.lower()
+            is_gemini = bid.startswith('gemini') or 'gemini' in glow
+            is_third = bid.startswith('3p') or 'claude' in glow or 'gpt' in glow
+
+            if is_gemini and not is_weekly and gem_5h is None:
+                gem_5h = {'key': 'session', 'label': 'Session', 'used': used, 'resets_at': resets_at,
+                          'detail': gname or 'Gemini Models'}
+            elif is_gemini and is_weekly and gem_wk is None:
+                gem_wk = {'key': 'weekly', 'label': 'Weekly', 'used': used, 'resets_at': resets_at,
+                          'detail': gname or 'Gemini Models'}
+            elif is_third and not is_weekly and third_5h is None:
+                third_5h = {'key': 'agy_claude_5h', 'label': 'Claude 5h', 'used': used, 'resets_at': resets_at,
+                            'detail': gname or 'Claude and GPT models'}
+            elif is_third and is_weekly and third_wk is None:
+                third_wk = {'key': 'agy_claude_weekly', 'label': 'Claude Wk', 'used': used, 'resets_at': resets_at,
+                            'detail': gname or 'Claude and GPT models'}
+            else:
+                short = (gname.split()[0] if gname else 'Pool')[:7]
+                lbl = f'{short} Wk' if is_weekly else f'{short} 5h'
+                extras.append({'key': bid or f'extra_{len(extras)}', 'label': lbl, 'used': used,
+                               'resets_at': resets_at, 'detail': gname})
+
+    windows = [w for w in (gem_5h, gem_wk, third_5h, third_wk) if w is not None]
+    windows.extend(extras)
+    return windows
 
 
 def parse_gemini_quota(data: dict, antigravity: bool = False) -> list[dict]:
@@ -658,18 +823,47 @@ def fetch_chatgpt(home: Path | None = None, opener=_http_json) -> dict:
     return _empty_state(bool(token))
 
 
+_GEMINI_PROJECT_CACHE: dict[tuple[str, str], tuple[str | None, str, str, str]] = {}
+
+
 def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) -> tuple[list[dict], str]:
     is_agy = 'antigravity' in source.lower()
+    cache_key = (source, token[:24])
+    if opener is _http_json and cache_key in _GEMINI_PROJECT_CACHE:
+        cached_proj, cached_quota_url, cached_ua, cached_label = _GEMINI_PROJECT_CACHE[cache_key]
+        try:
+            payload = opener(
+                cached_quota_url,
+                method='POST',
+                headers={'Authorization': f'Bearer {token}', 'User-Agent': cached_ua},
+                body={'project': cached_proj} if cached_proj else {},
+            )
+            windows = parse_gemini_quota_summary(payload)
+            if windows and any(w['key'] in ('session', 'weekly') for w in windows):
+                return windows, cached_label
+            if not windows:
+                windows = parse_gemini_quota(payload, antigravity=is_agy)
+                if windows:
+                    return windows, cached_label
+        except _RateLimited:
+            raise
+        except _HttpStatus as err:
+            _GEMINI_PROJECT_CACHE.pop(cache_key, None)
+            if err.code == 401:
+                raise
+        except Exception:
+            _GEMINI_PROJECT_CACHE.pop(cache_key, None)
+
     endpoints = (
-        ((ANTIGRAVITY_LOAD_URL, ANTIGRAVITY_QUOTA_URL, 'antigravity/1.0', 'ANTIGRAVITY', 'Antigravity'),
-         (GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'antigravity/1.0', 'IDE_UNSPECIFIED', 'Antigravity'))
+        ((ANTIGRAVITY_LOAD_URL, ANTIGRAVITY_SUMMARY_URL, ANTIGRAVITY_QUOTA_URL, ANTIGRAVITY_UA, 'ANTIGRAVITY', 'Antigravity'),
+         (GEMINI_LOAD_URL, GEMINI_SUMMARY_URL, GEMINI_QUOTA_URL, ANTIGRAVITY_UA, 'IDE_UNSPECIFIED', 'Antigravity'))
         if is_agy else
-        ((GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'GeminiCLI/0.1.0', 'IDE_UNSPECIFIED', ''),
-         (GEMINI_LOAD_URL, GEMINI_QUOTA_URL, 'antigravity/1.0', 'IDE_UNSPECIFIED', ''))
+        ((GEMINI_LOAD_URL, None, GEMINI_QUOTA_URL, 'GeminiCLI/0.1.0', 'IDE_UNSPECIFIED', ''),
+         (GEMINI_LOAD_URL, None, GEMINI_QUOTA_URL, 'antigravity/1.0', 'IDE_UNSPECIFIED', ''))
     )
     last_http: _HttpStatus | None = None
 
-    for load_url, quota_url, ua, ide_type, plan_label in endpoints:
+    for load_url, summary_url, quota_url, ua, ide_type, plan_label in endpoints:
         headers = {
             'Authorization': f'Bearer {token}',
             'User-Agent': ua,
@@ -698,11 +892,43 @@ def _query_gemini_with_token(token: str, source: str = '', opener=_http_json) ->
         except Exception:
             pass
 
-        for body in ([{'project': project}, {}] if project else [{}]):
+        bodies = [{'project': project}, {}] if project else [{}]
+        summary_partial: list[dict] = []
+        if summary_url:
+            for body in bodies:
+                try:
+                    spayload = opener(summary_url, method='POST', headers=headers, body=body)
+                    swin = parse_gemini_quota_summary(spayload)
+                    if swin and any(w['key'] in ('session', 'weekly') for w in swin):
+                        if opener is _http_json:
+                            _GEMINI_PROJECT_CACHE[cache_key] = (body.get('project'), summary_url, ua, plan_label)
+                        return swin, plan_label
+                    if swin and not summary_partial:
+                        summary_partial = swin
+                    # Support mocks that return retrieveUserQuota's buckets shape for any host URL
+                    fallback_win = parse_gemini_quota(spayload, antigravity=is_agy)
+                    if fallback_win and not swin:
+                        return fallback_win, plan_label
+                except _RateLimited:
+                    raise
+                except _HttpStatus as err:
+                    last_http = err
+                    if err.code == 401:
+                        raise
+                except Exception:
+                    pass
+
+        for body in bodies:
             try:
                 payload = opener(quota_url, method='POST', headers=headers, body=body)
                 windows = parse_gemini_quota(payload, antigravity=is_agy)
                 if windows:
+                    if summary_partial:
+                        gem_only = [w for w in windows if w['key'] != 'agy_claude']
+                        merged = gem_only[:1] + summary_partial
+                        return merged, plan_label
+                    if opener is _http_json:
+                        _GEMINI_PROJECT_CACHE[cache_key] = (body.get('project'), quota_url, ua, plan_label)
                     return windows, plan_label
             except _RateLimited:
                 raise
@@ -832,10 +1058,12 @@ def sample_snapshot(now: float | None = None) -> dict[str, dict]:
         'gemini': {
             'connected': True,
             'signed_in': True,
-            'plan': '',
+            'plan': 'Antigravity',
             'windows': [
-                {'key': 'pro', 'label': 'Pro', 'used': 18.0, 'resets_at': base + 13 * 3600 + 50 * 60},
-                {'key': 'flash', 'label': 'Flash', 'used': 6.0, 'resets_at': base + 13 * 3600 + 50 * 60},
+                {'key': 'session', 'label': 'Session', 'used': 18.0, 'resets_at': base + 2 * 3600 + 50 * 60},
+                {'key': 'weekly', 'label': 'Weekly', 'used': 11.0, 'resets_at': base + 6 * 86400 + 16 * 3600},
+                {'key': 'agy_claude_5h', 'label': 'Claude 5h', 'used': 6.0, 'resets_at': base + 4 * 3600 + 55 * 60},
+                {'key': 'agy_claude_weekly', 'label': 'Claude Wk', 'used': 4.0, 'resets_at': base + 6 * 86400 + 16 * 3600},
             ],
             'updated_at': base,
             'error': '',
@@ -845,8 +1073,18 @@ def sample_snapshot(now: float | None = None) -> dict[str, dict]:
 
 # ---------------------------------------------------------------- background coordinator
 
+def _stat_mtime(path: Path | None) -> float:
+    if path is None:
+        return 0.0
+    try:
+        return path.stat().st_mtime if path.exists() else 0.0
+    except OSError:
+        return 0.0
+
+
 class AIUsage(QObject):
     changed = Signal(dict)
+    busy_changed = Signal(bool)
     low_allowance = Signal(str, str, float)     # provider name, window label, remaining %
 
     def __init__(self, cfg, testing: bool = False, home: Path | None = None, opener=_http_json):
@@ -855,18 +1093,53 @@ class AIUsage(QObject):
         self.testing = testing
         self.home = home
         self.opener = opener
+        self._lock = threading.Lock()
         self._busy = False
+        self._queued_force = False
+        self._queued_providers: set[str] = set()
         self._stopped = False
         self._last_poll = 0.0
+        self._last_watch = 0.0
+        self._last_step = 0.0
+        self._last_card_open = False
+        self._last_win_cred_check = -999.0
+        self._cached_win_cred_mtime = 0.0
+        self._provider_polled_at: dict[str, float] = {}
         self._backoff_until: dict[str, float] = {}
-        self._mtimes: dict[str, float] = {}
+        self._cred_mtimes: dict[str, float] = {}
+        self._act_mtimes: dict[str, float] = {}
+        self._active_files: dict[str, Path] = {}
+        self._pending_live: set[str] = set()
+        self._first_pending: dict[str, float] = {}
+        self._last_activity: dict[str, float] = {}
+        self._reset_refetched: set[tuple[str, str, int]] = set()
         self._warned: set[tuple[str, str, int]] = set()
+        self._watcher: QFileSystemWatcher | None = None
+        self._fs_debounce: QTimer | None = None
+        self._live_timer: QTimer | None = None
         self.latest: dict[str, dict] = {p: _empty_state(False) for p in PROVIDERS}
         if testing:
             self.latest = sample_snapshot()
         else:
             self._load_cache()
-            self._mtimes = self._current_mtimes()
+            creds, acts, _ = self._scan_local_state(time.monotonic())
+            self._cred_mtimes = creds
+            self._act_mtimes = acts
+
+    @property
+    def is_busy(self) -> bool:
+        return self._busy
+
+    def refresh_mode(self) -> str:
+        return normalize_refresh_mode(self.cfg.get('ai_refresh'))
+
+    def live_watching_enabled(self) -> bool:
+        return self.refresh_mode() in ('live', '30s')
+
+    def active_providers(self) -> set[str]:
+        enabled = set(self.cfg.get('ai_enabled') or PROVIDERS)
+        individual = set(self.cfg.get('widgets') or ())
+        return (enabled | (individual & set(PROVIDERS))) & set(PROVIDERS)
 
     def cache_path(self) -> Path:
         return folder() / 'ai-usage-cache.json'
@@ -884,6 +1157,8 @@ class AIUsage(QObject):
         for provider in PROVIDERS:
             entry = raw.get(provider)
             if not isinstance(entry, dict) or not isinstance(entry.get('windows'), list) or not entry['windows']:
+                continue
+            if provider == 'gemini' and any(isinstance(w, dict) and w.get('key') == 'agy_claude' for w in entry['windows']):
                 continue
             self.latest[provider] = {
                 'connected': True,
@@ -914,74 +1189,426 @@ class AIUsage(QObject):
         except OSError:
             pass
 
-    def _current_mtimes(self) -> dict[str, float]:
-        found: dict[str, float] = {}
-        for key, path in (
-            ('claude', claude_credentials_path(self.home)),
-            ('chatgpt', codex_home_path(self.home) / 'auth.json'),
-            ('gemini', gemini_credentials_path(self.home)),
-        ):
-            try:
-                if path.is_file():
-                    found[key] = path.stat().st_mtime
-            except OSError:
-                pass
-        if self.home is None:
-            for target, _tok, _exp, written in read_windows_gemini_credentials():
-                if written:
-                    found[f'cred:{target}'] = written
-        sessions = codex_home_path(self.home) / 'sessions'
-        try:
-            if sessions.is_dir():
-                newest = max((p.stat().st_mtime for p in sessions.rglob('*.jsonl')), default=0.0)
-                if newest:
-                    found['codex_sessions'] = newest
-        except OSError:
-            pass
-        return found
+    def _scan_local_state(self, mono: float | None = None) -> tuple[dict[str, float], dict[str, float], list[str]]:
+        """Inspect credential files and recent local CLI session logs in sub-millisecond bounded time."""
+        now_m = time.monotonic() if mono is None else mono
+        creds: dict[str, float] = {}
+        acts: dict[str, float] = {}
+        watch_dirs: list[Path] = []
 
-    def watch_files(self) -> None:
-        """Notice a fresh login or token update promptly without polling endpoints every few seconds."""
-        if self.testing or self._busy:
+        # 1. Claude Code (~/.claude)
+        claude_cred = claude_credentials_path(self.home)
+        claude_dir = claude_cred.parent
+        c_cred_t = _stat_mtime(claude_cred)
+        if c_cred_t:
+            creds['claude'] = c_cred_t
+        c_act = max(
+            _stat_mtime(claude_dir / 'history.jsonl'),
+            _stat_mtime(claude_dir / 'stats-cache.json'),
+            _stat_mtime(self._active_files.get('claude')),
+        )
+        c_newest_path = self._active_files.get('claude')
+        proj_root = claude_dir / 'projects'
+        proj_subs = _newest_subdirs(proj_root, 4)
+        for sub in proj_subs:
+            for mt, fp in _newest_files_in(sub, '.jsonl', 2):
+                if mt > c_act:
+                    c_act = mt
+                    c_newest_path = fp
+        if c_newest_path is not None:
+            self._active_files['claude'] = c_newest_path
+        if c_act:
+            acts['claude'] = c_act
+        watch_dirs.extend([claude_dir, proj_root, *proj_subs[:2]])
+        if c_newest_path is not None:
+            watch_dirs.append(c_newest_path.parent)
+
+        # 2. OpenAI Codex / ChatGPT (~/.codex)
+        codex_dir = codex_home_path(self.home)
+        auth_t = _stat_mtime(codex_dir / 'auth.json')
+        if auth_t:
+            creds['chatgpt'] = auth_t
+        x_act = max(
+            _stat_mtime(codex_dir / 'history.jsonl'),
+            _stat_mtime(self._active_files.get('chatgpt')),
+        )
+        x_newest_path = self._active_files.get('chatgpt')
+        sessions_root = codex_dir / 'sessions'
+        for mt, fp in _newest_codex_rollouts(sessions_root, limit=2):
+            if mt > x_act:
+                x_act = mt
+                x_newest_path = fp
+        if x_newest_path is not None:
+            self._active_files['chatgpt'] = x_newest_path
+        if x_act:
+            acts['chatgpt'] = x_act
+        watch_dirs.extend([codex_dir, sessions_root])
+        if x_newest_path is not None:
+            watch_dirs.append(x_newest_path.parent)
+
+        # 3. Gemini CLI & Antigravity (~/.gemini + Windows Credential Manager)
+        gem_cred = gemini_credentials_path(self.home)
+        gem_dir = gem_cred.parent
+        g_cred_t = _stat_mtime(gem_cred)
+        if self.home is None:
+            if now_m - self._last_win_cred_check >= 10.0:
+                self._last_win_cred_check = now_m
+                self._cached_win_cred_mtime = max(
+                    (written for _t, _tok, _exp, written in read_windows_gemini_credentials() if written),
+                    default=0.0,
+                )
+            g_cred_t = max(g_cred_t, self._cached_win_cred_mtime)
+        if g_cred_t:
+            creds['gemini'] = g_cred_t
+
+        g_act = _stat_mtime(self._active_files.get('gemini'))
+        g_newest_path = self._active_files.get('gemini')
+        agy_conv = gem_dir / 'antigravity' / 'conversations'
+        for mt, fp in _newest_files_in(agy_conv, '', 2):
+            if mt > g_act:
+                g_act = mt
+                g_newest_path = fp
+        agy_brain = gem_dir / 'antigravity-cli' / 'brain'
+        brain_subs = _newest_subdirs(agy_brain, 3)
+        for bsub in brain_subs:
+            for candidate in (
+                bsub / '.system_generated' / 'logs' / 'transcript.jsonl',
+                bsub / '.system_generated' / 'logs' / 'transcript_full.jsonl',
+            ):
+                mt = _stat_mtime(candidate)
+                if mt > g_act:
+                    g_act = mt
+                    g_newest_path = candidate
+            for mt, fp in _newest_files_in(bsub, '', 2):
+                if mt > g_act:
+                    g_act = mt
+                    g_newest_path = fp
+        gem_tmp = gem_dir / 'tmp'
+        tmp_subs = _newest_subdirs(gem_tmp, 3)
+        for tsub in tmp_subs:
+            mt_log = _stat_mtime(tsub / 'logs.json')
+            if mt_log > g_act:
+                g_act = mt_log
+                g_newest_path = tsub / 'logs.json'
+            for mt, fp in _newest_files_in(tsub / 'chats', '.json', 2):
+                if mt > g_act:
+                    g_act = mt
+                    g_newest_path = fp
+        if g_newest_path is not None:
+            self._active_files['gemini'] = g_newest_path
+        if g_act:
+            acts['gemini'] = g_act
+        watch_dirs.extend([gem_dir, agy_conv, agy_brain, gem_tmp])
+        if brain_subs:
+            watch_dirs.append(brain_subs[0] / '.system_generated' / 'logs')
+            watch_dirs.append(brain_subs[0])
+        if g_newest_path is not None:
+            watch_dirs.append(g_newest_path.parent)
+
+        seen_paths: set[str] = set()
+        existing_watch: list[str] = []
+        for d in watch_dirs:
+            try:
+                if d.is_dir():
+                    norm = str(d)
+                    if norm not in seen_paths:
+                        seen_paths.add(norm)
+                        existing_watch.append(norm)
+                        if len(existing_watch) >= 22:
+                            break
+            except OSError:
+                continue
+        return creds, acts, existing_watch
+
+    def _sync_watcher_paths(self, desired: list[str]) -> None:
+        if self._watcher is None or self._stopped:
             return
-        now_mtimes = self._current_mtimes()
-        if now_mtimes != self._mtimes:
-            self._mtimes = now_mtimes
-            if time.monotonic() - self._last_poll >= 15.0:
-                self.fetch()
+        current = set(self._watcher.directories())
+        want = set(desired)
+        stale = list(current - want)
+        added = list(want - current)
+        if stale:
+            self._watcher.removePaths(stale)
+        if added:
+            self._watcher.addPaths(added)
+
+    def ensure_watching(self) -> None:
+        """Enable OS directory watching when Live / 30s updates are active."""
+        if self.testing or self._stopped:
+            return
+        if not self.live_watching_enabled():
+            if self._watcher is not None:
+                dirs = self._watcher.directories()
+                if dirs:
+                    self._watcher.removePaths(dirs)
+            self._pending_live.clear()
+            self._first_pending.clear()
+            return
+        if self._watcher is None:
+            self._watcher = QFileSystemWatcher(self)
+            self._fs_debounce = QTimer(self)
+            self._fs_debounce.setSingleShot(True)
+            self._fs_debounce.setInterval(250)
+            self._fs_debounce.timeout.connect(self._on_fs_activity)
+            self._live_timer = QTimer(self)
+            self._live_timer.setSingleShot(True)
+            self._live_timer.timeout.connect(self._on_live_timer)
+            self._watcher.directoryChanged.connect(self._queue_fs_check)
+            self._watcher.fileChanged.connect(self._queue_fs_check)
+        _, _, paths = self._scan_local_state(time.monotonic())
+        self._sync_watcher_paths(paths)
+
+    def configure(self) -> None:
+        """Apply changes to ai_refresh or enabled AI services immediately."""
+        if self.testing or self._stopped:
+            return
+        self.ensure_watching()
+        interval = float(poll_interval_for(self.refresh_mode(), card_open=False))
+        self.poke(max_age=interval)
+
+    def _queue_fs_check(self, _path: str = '') -> None:
+        if not self._stopped and self._fs_debounce is not None:
+            self._fs_debounce.start()
+
+    def _schedule_live_timer(self, mono: float) -> None:
+        if self._stopped or self._live_timer is None or not self._pending_live:
+            return
+        soonest = LIVE_DEBOUNCE
+        for p in self._pending_live:
+            gap_wait = max(0.0, MIN_LIVE_GAP - (mono - self._provider_polled_at.get(p, -999.0)))
+            debounce_wait = max(0.0, LIVE_DEBOUNCE - (mono - self._last_activity.get(p, mono)))
+            soonest = min(soonest, max(gap_wait, debounce_wait, 0.25))
+        self._live_timer.start(max(250, round(soonest * 1000)))
+
+    def _on_fs_activity(self) -> None:
+        if self._stopped or self.testing:
+            return
+        mono = time.monotonic()
+        self.watch_files(now_mono=mono)
+        self._schedule_live_timer(mono)
+
+    def _on_live_timer(self) -> None:
+        if self._stopped or self.testing:
+            return
+        mono = time.monotonic()
+        self.watch_files(now_mono=mono)
+        if self._pending_live:
+            self._schedule_live_timer(mono)
+
+    def _maybe_warn_low(self, provider: str, state: dict) -> tuple[str, str, float] | None:
+        if state.get('connected') and state.get('windows'):
+            first = state['windows'][0]
+            left = remaining_pct(first)
+            token_key = (provider, first['key'], round(first.get('resets_at') or 0))
+            if left <= LOW_THRESHOLD and token_key not in self._warned:
+                self._warned.add(token_key)
+                return (INFO[provider]['name'], first['label'], left)
+        return None
+
+    def _apply_local_codex_live(self) -> bool:
+        """Apply freshly written local Codex session rate_limits immediately with zero network wait."""
+        if 'chatgpt' not in self.active_providers():
+            return False
+        local_windows, local_plan, local_stamp = latest_codex_session_limits(codex_home_path(self.home) / 'sessions')
+        if not local_windows:
+            return False
+        prev = self.latest.get('chatgpt') or _empty_state(False)
+        if prev.get('connected') and prev.get('windows') == local_windows:
+            return False
+        fresh = {
+            'connected': True,
+            'signed_in': True,
+            'plan': local_plan or prev.get('plan', ''),
+            'windows': local_windows,
+            'updated_at': max(time.time(), local_stamp or 0.0),
+            'error': '',
+        }
+        self.latest = {**self.latest, 'chatgpt': fresh}
+        self._save_cache()
+        alert = self._maybe_warn_low('chatgpt', fresh)
+        if not self._stopped:
+            self.changed.emit(dict(self.latest))
+            if alert is not None and self.cfg.get('ai_warn_low', True):
+                self.low_allowance.emit(*alert)
+        return True
+
+    def _ready_live_providers(self, mono: float) -> set[str]:
+        active = self.active_providers()
+        ready: set[str] = set()
+        for provider in list(self._pending_live):
+            if provider not in active:
+                self._pending_live.discard(provider)
+                self._first_pending.pop(provider, None)
+                continue
+            quiet = mono - self._last_activity.get(provider, mono)
+            waited = mono - self._first_pending.get(provider, mono)
+            since_poll = mono - self._provider_polled_at.get(provider, -999.0)
+            if (quiet >= LIVE_DEBOUNCE or waited >= LIVE_MAX_WAIT) and since_poll >= MIN_LIVE_GAP:
+                self._pending_live.discard(provider)
+                self._first_pending.pop(provider, None)
+                ready.add(provider)
+        return ready
+
+    def _expired_window_providers(self, mono: float, now_epoch: float | None = None) -> set[str]:
+        """Re-fetch a provider once automatically right after one of its quota windows resets."""
+        now_s = time.time() if now_epoch is None else now_epoch
+        due: set[str] = set()
+        for provider in self.active_providers():
+            state = self.latest.get(provider) or {}
+            if not state.get('connected'):
+                continue
+            for win in state.get('windows') or ():
+                resets_at = win.get('resets_at')
+                if resets_at is not None and resets_at <= now_s:
+                    key = (provider, str(win.get('key', '')), round(resets_at))
+                    if key not in self._reset_refetched:
+                        if mono - self._provider_polled_at.get(provider, -999.0) >= MIN_LIVE_GAP:
+                            self._reset_refetched.add(key)
+                            due.add(provider)
+        return due
+
+    def watch_files(self, now_mono: float | None = None) -> set[str]:
+        """Notice fresh sign-ins and local CLI turn activity promptly."""
+        if self.testing or self._stopped:
+            return set()
+        mono = time.monotonic() if now_mono is None else now_mono
+        self._last_watch = mono
+        creds, acts, watch_paths = self._scan_local_state(mono)
+        if self._watcher is not None and self.live_watching_enabled():
+            self._sync_watcher_paths(watch_paths)
+
+        active = self.active_providers()
+        immediate: set[str] = set()
+
+        for provider in PROVIDERS:
+            new_cred = creds.get(provider, 0.0)
+            if new_cred != self._cred_mtimes.get(provider, 0.0):
+                self._cred_mtimes[provider] = new_cred
+                self._backoff_until.pop(provider, None)
+                if provider in active and mono - self._provider_polled_at.get(provider, -999.0) >= 2.0:
+                    immediate.add(provider)
+
+            new_act = acts.get(provider, 0.0)
+            if new_act != self._act_mtimes.get(provider, 0.0):
+                self._act_mtimes[provider] = new_act
+                if provider == 'chatgpt' and new_act > 0:
+                    self._apply_local_codex_live()
+                if provider in active and new_act > 0 and self.live_watching_enabled():
+                    self._first_pending.setdefault(provider, mono)
+                    self._last_activity[provider] = mono
+                    self._pending_live.add(provider)
+
+        due = immediate | self._ready_live_providers(mono)
+        if due:
+            self.fetch(providers=due, now_mono=mono)
+        return due
+
+    def poke(self, providers=None, max_age: float = 20.0, now_mono: float | None = None) -> set[str]:
+        """Refresh any active provider whose last network check is older than max_age seconds."""
+        if self.testing or self._stopped:
+            return set()
+        mono = time.monotonic() if now_mono is None else now_mono
+        active = self.active_providers()
+        scope = (set(providers) & active) if providers is not None else active
+        stale = {
+            p for p in scope
+            if p not in self._provider_polled_at or (mono - self._provider_polled_at[p]) >= max_age
+        }
+        if stale:
+            self.fetch(providers=stale, now_mono=mono)
+        return stale
+
+    def step(self, card_open: bool = False, now_mono: float | None = None) -> set[str]:
+        """Periodic coordinator heartbeat called once per second by dock AI widgets."""
+        if self.testing or self._stopped:
+            return set()
+        mono = time.monotonic() if now_mono is None else now_mono
+        if now_mono is None and (mono - self._last_step) < 0.75 and (not card_open or self._last_card_open):
+            return set()
+        self._last_step = mono
+        self._last_card_open = card_open
+
+        watch_iv = float(WATCH_EVERY) if self.live_watching_enabled() else 10.0
+        triggered: set[str] = set()
+        if self._last_watch == 0.0 or (mono - self._last_watch) >= watch_iv:
+            triggered |= self.watch_files(now_mono=mono)
+
+        due = self._ready_live_providers(mono) | self._expired_window_providers(mono)
+        interval = float(poll_interval_for(self.refresh_mode(), card_open=card_open))
+        active = self.active_providers()
+        for provider in active:
+            if provider not in self._provider_polled_at or (mono - self._provider_polled_at[provider]) >= interval:
+                due.add(provider)
+        due -= triggered
+        if due:
+            self.fetch(providers=due, now_mono=mono)
+        return triggered | due
 
     def stop(self) -> None:
         self._stopped = True
+        with self._lock:
+            self._queued_providers.clear()
+            self._queued_force = False
+        if self._fs_debounce is not None:
+            self._fs_debounce.stop()
+        if self._live_timer is not None:
+            self._live_timer.stop()
+        if self._watcher is not None:
+            dirs = self._watcher.directories()
+            if dirs:
+                self._watcher.removePaths(dirs)
+            files = self._watcher.files()
+            if files:
+                self._watcher.removePaths(files)
 
-    def fetch(self, force: bool = False) -> None:
-        if self.testing or self._stopped or self._busy:
+    def fetch(self, force: bool = False, providers=None, now_mono: float | None = None) -> None:
+        if self.testing or self._stopped:
             return
-        self._busy = True
-        self._last_poll = time.monotonic()
-        threading.Thread(target=self._run_fetch, args=(force,), daemon=True).start()
+        active = self.active_providers()
+        target = (set(providers) & active) if providers is not None else set(active)
+        if not target and not force:
+            return
+        if not target:
+            target = set(active)
+        mono = time.monotonic() if now_mono is None else now_mono
+        with self._lock:
+            for p in target:
+                if force or mono >= self._backoff_until.get(p, 0.0):
+                    self._provider_polled_at[p] = mono
+            if self._busy:
+                self._queued_force = self._queued_force or force
+                self._queued_providers |= target
+                return
+            self._busy = True
+        self._last_poll = mono
+        if not self._stopped:
+            self.busy_changed.emit(True)
+        threading.Thread(target=self._run_fetch, args=(force, target, now_mono), daemon=True).start()
 
-    def refresh_sync(self, force: bool = True) -> dict[str, dict]:
+    def refresh_sync(self, force: bool = True, providers=None, now_mono: float | None = None) -> dict[str, dict]:
         """Synchronous refresh helper for deterministic unit tests."""
-        self._last_poll = time.monotonic()
-        return self._collect(force=force)
+        mono = time.monotonic() if now_mono is None else now_mono
+        self._last_poll = mono
+        return self._collect(force=force, providers=providers, now_mono=now_mono)
 
-    def _collect(self, force: bool = False) -> dict[str, dict]:
-        mono = time.monotonic()
+    def _collect(self, force: bool = False, providers=None, now_mono: float | None = None) -> dict[str, dict]:
+        mono = time.monotonic() if now_mono is None else now_mono
         updated = dict(self.latest)
         alerts: list[tuple[str, str, float]] = []
-        enabled = set(self.cfg.get('ai_enabled') or PROVIDERS)
-        individual = set(self.cfg.get('widgets') or ())
-        active = enabled | (individual & set(PROVIDERS))
+        active = self.active_providers()
+        wanted = (set(providers) & active) if providers is not None else active
         for provider in PROVIDERS:
-            if provider not in active:
+            if provider not in wanted:
                 continue
             if not force and mono < self._backoff_until.get(provider, 0.0):
                 continue
+            self._provider_polled_at[provider] = mono
             previous = self.latest.get(provider) or _empty_state(False)
             try:
                 fresh = FETCHERS[provider](home=self.home, opener=self.opener)
-            except _RateLimited:
-                self._backoff_until[provider] = mono + RATE_LIMIT_WAIT
+            except _RateLimited as exc:
+                wait = exc.retry_after if exc.retry_after is not None else RATE_LIMIT_WAIT
+                self._backoff_until[provider] = mono + wait
                 if previous.get('connected') and previous.get('windows'):
                     updated[provider] = {**previous, 'error': ''}
                 else:
@@ -992,14 +1619,14 @@ class AIUsage(QObject):
                 updated[provider] = {**previous, 'error': fresh.get('error', '')}
             else:
                 updated[provider] = fresh
-            state = updated[provider]
-            if state.get('connected') and state.get('windows'):
-                first = state['windows'][0]
-                left = remaining_pct(first)
-                token_key = (provider, first['key'], round(first.get('resets_at') or 0))
-                if left <= LOW_THRESHOLD and token_key not in self._warned:
-                    self._warned.add(token_key)
-                    alerts.append((INFO[provider]['name'], first['label'], left))
+            alert = self._maybe_warn_low(provider, updated[provider])
+            if alert is not None:
+                alerts.append(alert)
+        if 'gemini' in wanted and self.home is None:
+            # Refresh cached Win32 credential timestamp in case agy refreshed an expired token in-place
+            self._last_win_cred_check = -999.0
+            creds, _, _ = self._scan_local_state(mono)
+            self._cred_mtimes['gemini'] = creds.get('gemini', 0.0)
         self.latest = updated
         self._save_cache()
         for provider_name, label, left in alerts:
@@ -1007,13 +1634,32 @@ class AIUsage(QObject):
                 self.low_allowance.emit(provider_name, label, left)
         return updated
 
-    def _run_fetch(self, force: bool) -> None:
+    def _run_fetch(self, force: bool, providers: set[str], now_mono: float | None = None) -> None:
+        cur_force = force
+        cur_providers = set(providers)
+        cur_mono = now_mono
         try:
-            result = self._collect(force=force)
-            if not self._stopped:
-                self.changed.emit(result)
+            while True:
+                result = self._collect(force=cur_force, providers=cur_providers, now_mono=cur_mono)
+                cur_mono = None
+                if not self._stopped:
+                    self.changed.emit(result)
+                with self._lock:
+                    if not self._stopped and (self._queued_providers or self._queued_force):
+                        cur_force = self._queued_force
+                        cur_providers = set(self._queued_providers) or self.active_providers()
+                        self._queued_force = False
+                        self._queued_providers.clear()
+                        continue
+                    self._busy = False
+                    break
         finally:
-            self._busy = False
+            with self._lock:
+                self._busy = False
+                self._queued_providers.clear()
+                self._queued_force = False
+            if not self._stopped:
+                self.busy_changed.emit(False)
 
 
 # ---------------------------------------------------------------- drawing helpers

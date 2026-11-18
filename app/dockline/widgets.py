@@ -2646,10 +2646,10 @@ class WeatherTile(Tile):
 
 # ================================================================ AI
 
-class _UsageBarRow(QWidget):
-    """One limit window inside an AI popup card: name, reset time, percent and health bar."""
+class _UsageRingCell(QWidget):
+    """One limit window inside an AI popup card: label on top, circular progress ring, and reset timer."""
 
-    HEIGHT = 38
+    HEIGHT = 96
 
     def __init__(self, look: L.Look, window: dict, show_used: bool, clock24: bool):
         super().__init__()
@@ -2658,13 +2658,25 @@ class _UsageBarRow(QWidget):
         self.show_used = show_used
         self.clock24 = clock24
         self.setFixedHeight(self.HEIGHT)
+        self._sync_tooltip()
+
+    def _sync_tooltip(self) -> None:
+        pct, _share, left = ai.shown_value(self.window, show_used=self.show_used)
+        word = 'used' if self.show_used else 'left'
+        is_idle = self.window.get('resets_at') is None and left >= 99.9
+        long_reset = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24, idle=is_idle)
+        detail = self.window.get('detail')
+        head = f"{detail} · {self.window.get('label', '')}" if detail else self.window.get('label', '')
+        self.setToolTip(f'{head} — {pct}% {word} · {long_reset}')
 
     def set_mode(self, show_used: bool) -> None:
         self.show_used = show_used
+        self._sync_tooltip()
         self.update()
 
     def set_window(self, window: dict) -> None:
         self.window = window
+        self._sync_tooltip()
         self.update()
 
     def paintEvent(self, _):
@@ -2673,18 +2685,23 @@ class _UsageBarRow(QWidget):
         look = self.look
         w = self.width()
         pct, share, left = ai.shown_value(self.window, show_used=self.show_used)
-        word = 'used' if self.show_used else 'left'
-        pct_text = f'{pct}% {word}'
         is_idle = self.window.get('resets_at') is None and left >= 99.9
-        reset_text = ai.format_reset_long(self.window.get('resets_at'), clock24=self.clock24, idle=is_idle)
-        L.text(painter, QRectF(0, 0, 68, 20), self.window.get('label', ''), look.c(look.text), 13, 600,
-               Qt.AlignLeft | Qt.AlignVCenter)
-        L.text(painter, QRectF(w - 74, 0, 74, 20), pct_text, look.c(look.text), 13, 600,
-               Qt.AlignRight | Qt.AlignVCenter)
-        L.text(painter, QRectF(68, 0, max(0, w - 146), 20), reset_text, look.c(look.sub), 12, 400,
-               Qt.AlignRight | Qt.AlignVCenter)
-        bar_rect = QRectF(0, 25, w, 6)
-        L.bar(painter, bar_rect, share, ai.health_color(left, look.dark), look.c(look.track))
+        reset_text = ai.format_reset_card(self.window.get('resets_at'), idle=is_idle)
+
+        L.text(painter, QRectF(0, 0, w, 18), self.window.get('label', ''), look.c(look.text), 12, 600,
+               Qt.AlignCenter)
+
+        ring_d = 50.0
+        stroke = 4.6
+        ring_rect = QRectF((w - ring_d) / 2.0, 22.0, ring_d, ring_d)
+        track_col = look.c(look.track)
+        if track_col.alpha() < (68 if look.dark else 56):
+            track_col.setAlpha(68 if look.dark else 56)
+        L.ring(painter, ring_rect, share, ai.health_color(left, look.dark), track_col, stroke)
+        L.text(painter, ring_rect, f'{pct}%', look.c(look.text), 13, 600, Qt.AlignCenter)
+
+        if reset_text:
+            L.text(painter, QRectF(0, 76, w, 18), reset_text, look.c(look.sub), 11, 400, Qt.AlignCenter)
 
 
 class _AITile(Tile):
@@ -2695,19 +2712,25 @@ class _AITile(Tile):
     def setup(self):
         self._ticks = 0
         self._preview = False
-        self._card_rows: list[tuple[str, int, _UsageBarRow]] = []
+        self._last_sig: tuple = ()
+        self._card_shape: tuple = ()
+        self._card_rows: list[tuple[str, int, _UsageRingCell]] = []
         self._mode_sub: QLabel | None = None
         self._providers_box: QVBoxLayout | None = None
         self._card_multi = False
         self.dock.ai.changed.connect(self._ai_changed)
-        if not self.dock.testing and time.monotonic() - self.dock.ai._last_poll > 30.0:
-            self.dock.ai.fetch()
+        self.dock.ai.busy_changed.connect(self._ai_busy_changed)
+        if not self.dock.testing:
+            self.dock.ai.ensure_watching()
+            self.dock.ai.poke(max_age=15.0)
 
     def retire(self):
-        try:
-            self.dock.ai.changed.disconnect(self._ai_changed)
-        except (RuntimeError, TypeError):
-            pass
+        for sig, slot in ((self.dock.ai.changed, self._ai_changed),
+                          (self.dock.ai.busy_changed, self._ai_busy_changed)):
+            try:
+                sig.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass
 
     def enabled_providers(self) -> list[str]:
         raw = self.dock.cfg.get('ai_enabled')
@@ -2719,14 +2742,34 @@ class _AITile(Tile):
             return tuple(self.enabled_providers())
         return (self.PROVIDER,) if self.PROVIDER else ai.PROVIDERS
 
+    def _shape_for(self, snap: dict[str, dict], providers: tuple[str, ...]) -> tuple:
+        out = []
+        for p in providers:
+            st = snap.get(p) or {}
+            wins = st.get('windows') or []
+            out.append((p, bool(st.get('connected') and wins), len(wins), st.get('plan', ''), st.get('error', '')))
+        return tuple(out)
+
     def _ai_changed(self, _):
         self.update()
         self._sync_open_card()
+
+    def _ai_busy_changed(self, _busy: bool):
+        if self.card is not None and self._mode_sub is not None:
+            try:
+                self._mode_sub.setText(self._subtitle_text(self.snapshot(), self.active_card_providers()))
+            except RuntimeError:
+                self._mode_sub = None
 
     def _sync_open_card(self) -> None:
         if self.card is None:
             return
         snap = self.snapshot()
+        providers = self.active_card_providers()
+        if self._providers_box is not None and self._shape_for(snap, providers) != self._card_shape:
+            self._populate_provider_rows(providers)
+            self.card.refit()
+            return
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         for provider, idx, row_widget in list(self._card_rows):
             windows = snap.get(provider, {}).get('windows') or []
@@ -2738,25 +2781,61 @@ class _AITile(Tile):
                     pass
         if self._mode_sub is not None:
             try:
-                self._mode_sub.setText(self._subtitle_text(snap, self.active_card_providers()))
+                self._mode_sub.setText(self._subtitle_text(snap, providers))
             except RuntimeError:
                 self._mode_sub = None
 
+    def _tick_open_card(self) -> None:
+        if self.card is None:
+            return
+        snap = self.snapshot()
+        providers = self.active_card_providers()
+        if self._mode_sub is not None:
+            try:
+                sub = self._subtitle_text(snap, providers)
+                if self._mode_sub.text() != sub:
+                    self._mode_sub.setText(sub)
+            except RuntimeError:
+                self._mode_sub = None
+        for _provider, _idx, row_widget in list(self._card_rows):
+            try:
+                row_widget.update()
+            except RuntimeError:
+                pass
+
     def card_closed(self):
         self._card_rows = []
+        self._card_shape = ()
         self._mode_sub = None
         self._providers_box = None
         super().card_closed()
 
+    def _visual_signature(self) -> tuple:
+        snap = self.snapshot()
+        show_used = bool(self.dock.cfg.get('ai_show_used', False))
+        providers = (self.PROVIDER,) if self.PROVIDER else tuple(self.enabled_providers())
+        sig: list = [show_used, self._tile_style()]
+        for p in providers:
+            st = snap.get(p) or {}
+            if st.get('connected'):
+                for w in (st.get('windows') or ())[:2]:
+                    pct, _sh, _left = ai.shown_value(w, show_used=show_used)
+                    sig.append((p, pct, ai.format_reset(w.get('resets_at'))))
+            else:
+                sig.append((p, st.get('error', '')))
+        return tuple(sig)
+
     def tick(self):
         self._ticks += 1
         if not self.dock.testing:
-            if self._ticks % ai.WATCH_EVERY == 0:
-                self.dock.ai.watch_files()
-            if self._ticks % ai.POLL_EVERY == 0:
-                self.dock.ai.fetch()
-        if self._ticks % 15 == 0:
+            card_open = any(isinstance(t, _AITile) and t.card is not None for t in self.dock.tiles)
+            self.dock.ai.step(card_open=card_open)
+        sig = self._visual_signature()
+        if sig != self._last_sig or self._ticks % 10 == 0:
+            self._last_sig = sig
             self.update()
+        if self.card is not None:
+            self._tick_open_card()
 
     def snapshot(self) -> dict[str, dict]:
         if self.dock.testing:
@@ -2943,13 +3022,16 @@ class _AITile(Tile):
 
     def _subtitle_text(self, snap: dict[str, dict], providers: tuple[str, ...] = ai.PROVIDERS) -> str:
         mode = 'Allowance used' if self.dock.cfg.get('ai_show_used', False) else 'Allowance remaining'
+        if not self.dock.testing and self.dock.ai.is_busy:
+            return f'{mode} · Updating…'
+        live_tag = ' · Live' if ai.normalize_refresh_mode(self.dock.cfg.get('ai_refresh')) == 'live' else ''
         stamps = [snap[p]['updated_at'] for p in providers
                   if snap.get(p, {}).get('connected') and snap[p].get('updated_at')]
         if stamps:
             age = ai.format_age(max(stamps))
             if age:
-                return f'{mode} · {age}'
-        return mode
+                return f'{mode}{live_tag} · {age}'
+        return f'{mode}{live_tag}'
 
     def refresh_now(self) -> None:
         self.dock.ai.fetch(force=True)
@@ -2959,8 +3041,18 @@ class _AITile(Tile):
         self.dock.changed('ai')
         self._sync_open_card()
 
+    def set_refresh_mode(self, refresh_mode: str) -> None:
+        self.dock.cfg['ai_refresh'] = ai.normalize_refresh_mode(refresh_mode)
+        self.dock.ai.configure()
+        self.dock.changed('ai')
+        for t in self.dock.tiles:
+            if isinstance(t, _AITile):
+                t._sync_open_card()
+
     def menu(self, menu, pos):
         menu.addAction('Refresh limits', self.refresh_now)
+        if ai.normalize_refresh_mode(self.dock.cfg.get('ai_refresh')) != 'live':
+            menu.addAction('Live updates', lambda: self.set_refresh_mode('live'))
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         menu.addAction('Show remaining %' if show_used else 'Show used %',
                        lambda: self.set_show_used(not show_used))
@@ -2978,6 +3070,7 @@ class _AITile(Tile):
                 old_w.deleteLater()
         self._card_rows = []
         snap = self.snapshot()
+        self._card_shape = self._shape_for(snap, providers)
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         clock24 = bool(self.dock.cfg.get('clock24', False))
         ratio = self.devicePixelRatioF() or 2.0
@@ -3003,10 +3096,18 @@ class _AITile(Tile):
             block_lay.addLayout(head)
 
             if state.get('connected') and state.get('windows'):
+                grid = QGridLayout()
+                grid.setContentsMargins(0, 2, 0, 2)
+                grid.setHorizontalSpacing(8)
+                grid.setVerticalSpacing(8)
+                for col in range(4):
+                    grid.setColumnStretch(col, 1)
+                    grid.setColumnMinimumWidth(col, 74)
                 for idx, win_data in enumerate(state['windows']):
-                    bar_row = _UsageBarRow(self.look, win_data, show_used, clock24)
-                    self._card_rows.append((provider, idx, bar_row))
-                    block_lay.addWidget(bar_row)
+                    ring_cell = _UsageRingCell(self.look, win_data, show_used, clock24)
+                    self._card_rows.append((provider, idx, ring_cell))
+                    grid.addWidget(ring_cell, idx // 4, idx % 4)
+                block_lay.addLayout(grid)
             else:
                 note = state.get('error') or info['hint']
                 block_lay.addWidget(_label(note, 'sub'))
@@ -3107,6 +3208,20 @@ class _AITile(Tile):
             style_row.addWidget(btn)
         style_row.addStretch(1)
         drawer_lay.addLayout(style_row)
+
+        refresh_row = QHBoxLayout()
+        refresh_row.setSpacing(6)
+        refresh_row.addWidget(_label('Updates', 'sub'))
+        refresh_group = QButtonGroup(drawer)
+        refresh_group.setExclusive(True)
+        cur_refresh = ai.normalize_refresh_mode(self.dock.cfg.get('ai_refresh'))
+        for mode_key, word in (('live', 'Live'), ('30s', '30s'), ('1m', '1m'), ('5m', '5m')):
+            btn = _button(word, lambda _=False, m=mode_key: self.set_refresh_mode(m), checkable=True)
+            btn.setChecked(cur_refresh == mode_key)
+            refresh_group.addButton(btn)
+            refresh_row.addWidget(btn)
+        refresh_row.addStretch(1)
+        drawer_lay.addLayout(refresh_row)
 
         if multi_service:
             # Show/hide AI services completely from both the card and the bar tile
@@ -3218,7 +3333,9 @@ class _AITile(Tile):
         warn_row.addStretch(1)
         drawer_lay.addLayout(warn_row)
 
-        self.open_card(content, 352)
+        self.open_card(content, 376)
+        if not self.dock.testing:
+            self.dock.ai.poke(providers=active, max_age=15.0)
 
 
 class AILimitsTile(_AITile):
@@ -3311,7 +3428,7 @@ class ChatGPTTile(_SingleProviderAITile):
 
 class GeminiTile(_SingleProviderAITile):
     ID, NAME, PROVIDER = 'gemini', 'Gemini Usage', 'gemini'
-    ABOUT = 'Your Gemini CLI Pro and Flash quota left, and when each bucket resets.'
+    ABOUT = 'Your Gemini session and weekly quota left, and when each window resets.'
 
 
 WIDGETS: list[type[Tile]] = [

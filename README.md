@@ -12,7 +12,7 @@ What it does in the taskbar's place:
 - Search opens Windows search. Media is one button: its card has a page per app playing sound,
   with art, title and controls, turned with the scroll wheel, as Android's media player.
 - Volume per app in the Sound card; a draggable progress bar on each media page.
-- AI usage trackers (AI Limits, Claude, ChatGPT and Gemini) showing remaining allowance and reset timers from your existing local sign-ins.
+- AI usage trackers (AI Limits, Claude, ChatGPT and Gemini) showing remaining allowance and reset timers from your existing local sign-ins, with live updates as you use them.
 - Settings > Backup exports and imports every setting, pinned shortcuts included.
 - Previews on hover (and on a click on an app with several windows), close above the dock; resting on
   one shows that window alone (Windows' own live preview). Attention flashing, middle-click or Shift+click for a new window, End task.
