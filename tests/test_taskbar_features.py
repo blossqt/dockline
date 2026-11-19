@@ -576,6 +576,92 @@ class WindowsTests(unittest.TestCase):
 
 
 class AIUsageTests(Temp):
+    def write_claude(self, token: str, expires_in: float) -> Path:
+        import json
+        import time
+        path = self.folder / '.claude' / '.credentials.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'claudeAiOauth': {
+            'accessToken': token, 'refreshToken': 'r', 'subscriptionType': 'pro',
+            'expiresAt': int((time.time() + expires_in) * 1000)}}), 'utf-8')
+        return path
+
+    def test_expired_claude_sign_in_is_renewed_by_the_cli(self):
+        """Claude Code in the desktop app never renews ~/.claude/.credentials.json, so its token
+        expires 8 hours after the CLI's last use: the CLI renews it, and the usage is read again."""
+        from dockline import ai
+        usage = {'five_hour': {'utilization': 12, 'resets_at': '2030-01-01T00:00:00Z'},
+                 'seven_day': {'utilization': 45, 'resets_at': '2030-01-05T00:00:00Z'}}
+        sent, renewals = [], []
+
+        def opener(url, headers=None, **_):
+            sent.append(headers['Authorization'])
+            if headers['Authorization'] != 'Bearer new':
+                raise ai._HttpStatus(401)
+            return usage
+
+        def renew(works=True):
+            def go():
+                renewals.append(1)
+                if works:
+                    self.write_claude('new', 8 * 3600)
+                return works
+            return go
+
+        self.write_claude('old', -3600)                     # expired an hour ago
+        state = ai.fetch_claude(self.folder, opener, renew())
+        self.assertTrue(state['connected'])
+        self.assertEqual((sent, len(renewals)), (['Bearer new'], 1))     # renewed before asking
+        self.assertEqual([w['used'] for w in state['windows']], [12, 45])
+
+        sent.clear(), renewals.clear()
+        self.write_claude('old', 3600)                      # not expired by its clock, refused by the server
+        state = ai.fetch_claude(self.folder, opener, renew())
+        self.assertTrue(state['connected'])
+        self.assertEqual((sent, len(renewals)), (['Bearer old', 'Bearer new'], 1))
+
+        sent.clear(), renewals.clear()
+        self.write_claude('old', -3600)                     # the CLI could not renew it (signed out)
+        state = ai.fetch_claude(self.folder, opener, renew(False))
+        self.assertFalse(state['connected'])
+        self.assertTrue(state['signed_in'])
+        self.assertEqual(state['error'], ai.CLAUDE_EXPIRED)
+        self.assertEqual(len(renewals), 1)                  # tried once, not again on the refusal
+
+    def test_claude_renewal_runs_the_cli_without_host_sign_in_and_waits_after_failing(self):
+        import subprocess
+        from unittest import mock
+        from dockline import ai
+        path = self.write_claude('old', -3600)
+        runs = []
+        works = [False]
+
+        def run(args, **kwargs):
+            runs.append((args, kwargs['env']))
+            if works[0]:
+                self.write_claude('new', 8 * 3600)
+                os.utime(path, (1e9 + len(runs), 1e9 + len(runs)))
+            return subprocess.CompletedProcess(args, 0, '', '')
+
+        host = {'CLAUDE_CODE_OAUTH_TOKEN': 'host', 'ANTHROPIC_BASE_URL': 'http://localhost:1',
+                'CLAUDE_CONFIG_DIR': str(self.folder / '.claude')}
+        with mock.patch.dict(ai._claude_renewal, {'at': -1e9, 'mtime': -1.0}), \
+                mock.patch.dict(os.environ, host), \
+                mock.patch.object(ai, '_claude_cli', lambda: r'C:\x\claude.exe'), \
+                mock.patch.object(ai.subprocess, 'run', run):
+            self.assertFalse(ai._refresh_claude_cli_token(path))         # ran, renewed nothing
+            self.assertEqual(runs[0][0], [r'C:\x\claude.exe', 'auth', 'status', '--json'])
+            env = runs[0][1]
+            self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', env)
+            self.assertNotIn('ANTHROPIC_BASE_URL', env)
+            self.assertEqual(env['CLAUDE_CONFIG_DIR'], host['CLAUDE_CONFIG_DIR'])
+            self.assertFalse(ai._refresh_claude_cli_token(path))         # too soon: not run again
+            self.assertEqual(len(runs), 1)
+            os.utime(path, (1e9, 1e9))                                  # signed in again meanwhile
+            works[0] = True
+            self.assertTrue(ai._refresh_claude_cli_token(path))
+            self.assertEqual(len(runs), 2)
+
     def test_parsers_and_reset_timers(self):
         import json
         import time

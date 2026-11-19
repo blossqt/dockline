@@ -3,7 +3,8 @@
 Reads the sign-ins already kept on this PC by Claude Code (~/.claude/.credentials.json), OpenAI Codex
 (~/.codex/auth.json and ~/.codex/sessions) and Gemini CLI / Antigravity CLI (~/.gemini/oauth_creds.json
 and Windows Credential Manager). Read-only: credential stores are never written by Dockline, and tokens
-are never saved in Dockline's settings or cache.
+are never saved in Dockline's settings or cache. An expired sign-in is renewed by the vendor's own CLI
+(`claude auth status`, `agy models`), which writes its own store; neither spends any allowance.
 """
 
 from __future__ import annotations
@@ -371,6 +372,66 @@ def _refresh_antigravity_cli_token() -> bool:
         return False
 
 
+CLAUDE_RENEW_GAP = 300.0   # seconds between attempts to renew a Claude sign-in that the CLI could not renew
+CLAUDE_EXPIRED = 'The Claude Code sign-in has expired. Run claude auth login to sign in again.'
+_claude_renewal = {'at': -1e9, 'mtime': -1.0}
+
+
+def _claude_cli() -> str:
+    exe = shutil.which('claude')
+    if not exe:
+        for candidate in (Path.home() / '.local' / 'bin' / 'claude.exe',
+                          Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude.cmd'):
+            if candidate.is_file():
+                return str(candidate)
+    return exe or ''
+
+
+def _refresh_claude_cli_token(path: Path | None = None) -> bool:
+    """Ask Claude Code to renew its expired sign-in: `claude auth status` renews the token in
+    ~/.claude/.credentials.json (no window, no allowance spent, under a second). Claude Code in the
+    Claude desktop app is signed in by the app and never renews that file, so it expires 8 hours after
+    the CLI was last used. An attempt that renews nothing waits CLAUDE_RENEW_GAP before the next, unless
+    the file changes meanwhile."""
+    path = path or claude_credentials_path()
+    mtime = _stat_mtime(path)
+    mono = time.monotonic()
+    if mono - _claude_renewal['at'] < CLAUDE_RENEW_GAP and mtime == _claude_renewal['mtime']:
+        return False
+    _claude_renewal['at'] = mono
+    exe = _claude_cli()
+    if not exe:
+        _claude_renewal['mtime'] = mtime
+        return False
+    env = {k: v for k, v in os.environ.items()          # the CLI's own stored sign-in, not a host's
+           if k.upper() == 'CLAUDE_CONFIG_DIR' or not k.upper().startswith(('CLAUDE', 'ANTHROPIC'))}
+    try:
+        subprocess.run([exe, 'auth', 'status', '--json'], capture_output=True, timeout=30, env=env,
+                       creationflags=CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    after = _stat_mtime(path)
+    _claude_renewal['mtime'] = after
+    return after != mtime
+
+
+def _claude_sign_in(path: Path) -> tuple[str, str, float | None] | None:
+    """The access token, plan and expiry (epoch seconds) in Claude Code's credentials file."""
+    try:
+        raw = json.loads(path.read_text('utf-8'))
+    except (OSError, ValueError):
+        return None
+    oauth = raw.get('claudeAiOauth') if isinstance(raw, dict) else None
+    if not isinstance(oauth, dict):
+        return '', '', None
+    expires = oauth.get('expiresAt')
+    try:
+        expires = float(expires) / 1000 if expires else None
+    except (TypeError, ValueError):
+        expires = None
+    return str(oauth.get('accessToken') or ''), str(oauth.get('subscriptionType') or '').strip(), expires
+
+
 def _empty_state(signed_in: bool = False, error: str = '') -> dict:
     return {
         'connected': False,
@@ -698,37 +759,52 @@ def parse_gemini_quota(data: dict, antigravity: bool = False) -> list[dict]:
 
 # ---------------------------------------------------------------- provider fetchers
 
-def fetch_claude(home: Path | None = None, opener=_http_json) -> dict:
+def fetch_claude(home: Path | None = None, opener=_http_json, renew=None) -> dict:
+    """renew: renews an expired sign-in, True once the file changed (the CLI's, for the real home;
+    none for a test's home)."""
     path = claude_credentials_path(home)
     if not path.is_file():
         return _empty_state(False)
-    try:
-        raw = json.loads(path.read_text('utf-8'))
-    except (OSError, ValueError):
+    if renew is None:
+        renew = (lambda: _refresh_claude_cli_token(path)) if home is None else (lambda: False)
+    found = _claude_sign_in(path)
+    if found is None:
         return _empty_state(False, 'Could not read Claude credentials.')
-    oauth = raw.get('claudeAiOauth') if isinstance(raw, dict) else None
-    token = (oauth.get('accessToken') if isinstance(oauth, dict) else None) or ''
+    renewed = False
+    if found[0] and found[2] is not None and found[2] <= time.time() + 60:     # expired, or about to
+        renewed = True
+        if renew():
+            found = _claude_sign_in(path) or found
+    token, plan_raw, _ = found
     if not token:
         return _empty_state(False)
-    plan_raw = str((oauth or {}).get('subscriptionType') or '').strip()
     plan = plan_raw.capitalize() if plan_raw else ''
-    try:
-        payload = opener(
-            CLAUDE_USAGE_URL,
-            headers={
-                'Authorization': f'Bearer {token}',
-                'anthropic-beta': 'oauth-2025-04-20',
-                'User-Agent': 'claude-code/2.1.0',
-            },
-        )
-    except _RateLimited:
-        raise
-    except _HttpStatus as err:
-        if err.code in (401, 403):
-            return _empty_state(True, 'Claude session expired — open Claude Code to refresh your sign-in.')
-        return _empty_state(True, f'Claude usage unavailable ({err}).')
-    except Exception:
-        return _empty_state(True, 'Could not reach Claude right now.')
+    payload = None
+    for _attempt in range(2):
+        try:
+            payload = opener(
+                CLAUDE_USAGE_URL,
+                headers={
+                    'Authorization': f'Bearer {token}',
+                    'anthropic-beta': 'oauth-2025-04-20',
+                    'User-Agent': 'claude-code/2.1.0',
+                },
+            )
+            break
+        except _RateLimited:
+            raise
+        except _HttpStatus as err:
+            if err.code not in (401, 403):
+                return _empty_state(True, f'Claude usage unavailable ({err}).')
+            if renewed or not renew():
+                return _empty_state(True, CLAUDE_EXPIRED)
+            renewed = True
+            again = _claude_sign_in(path)
+            if not again or not again[0]:
+                return _empty_state(True, CLAUDE_EXPIRED)
+            token = again[0]
+        except Exception:
+            return _empty_state(True, 'Could not reach Claude right now.')
     windows = parse_claude_usage(payload)
     if not windows:
         return _empty_state(True, 'No active plan window reported by Claude.')

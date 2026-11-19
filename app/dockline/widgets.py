@@ -3108,6 +3108,8 @@ class _AITile(Tile):
                     self._card_rows.append((provider, idx, ring_cell))
                     grid.addWidget(ring_cell, idx // 4, idx % 4)
                 block_lay.addLayout(grid)
+                if state.get('error'):                       # the last reading is kept: why it is not newer
+                    block_lay.addWidget(_label(state['error'], 'sub'))
             else:
                 note = state.get('error') or info['hint']
                 block_lay.addWidget(_label(note, 'sub'))
