@@ -77,6 +77,8 @@ LIVE_DEBOUNCE = 1.5     # quiet seconds after local file activity before polling
 LIVE_MAX_WAIT = 4.0     # max seconds to wait during continuous streaming before polling
 MIN_LIVE_GAP = 12.0     # minimum seconds between automatic live polls per provider
 RATE_LIMIT_WAIT = 120   # default seconds to back off if a provider answers HTTP 429
+RATE_LIMIT_SAY = 900    # s: a reading kept this long through rate limits says why it is not newer
+RATE_LIMITED = 'Usage requests are rate-limited. Retrying automatically.'
 LOW_THRESHOLD = 15.0    # warn once per reset window when remaining allowance drops to or below 15%
 CREATE_NO_WINDOW = 0x08000000
 
@@ -372,47 +374,128 @@ def _refresh_antigravity_cli_token() -> bool:
         return False
 
 
-CLAUDE_RENEW_GAP = 300.0   # seconds between attempts to renew a Claude sign-in that the CLI could not renew
+CLAUDE_RENEW_GAP = 300.0   # seconds between attempts to renew a Claude sign-in that could not be renewed
 CLAUDE_EXPIRED = 'The Claude Code sign-in has expired. Run claude auth login to sign in again.'
+# Claude Code's own sign-in server and client (its CLI's TOKEN_URL and CLIENT_ID)
+CLAUDE_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+CLAUDE_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
+CLAUDE_LOCK_STALE = 60.0   # s: Claude Code's refresh locks are stale after a minute (renewed every 5 s held)
 _claude_renewal = {'at': -1e9, 'mtime': -1.0}
 
 
-def _claude_cli() -> str:
-    exe = shutil.which('claude')
-    if not exe:
-        for candidate in (Path.home() / '.local' / 'bin' / 'claude.exe',
-                          Path(os.environ.get('APPDATA', '')) / 'npm' / 'claude.cmd'):
-            if candidate.is_file():
-                return str(candidate)
-    return exe or ''
+def _claude_locks(path: Path) -> list[Path]:
+    """The locks Claude Code holds while it renews its sign-in (proper-lockfile directories): one in its
+    folder, and the older one beside the folder."""
+    folder = path.parent
+    try:
+        beside = Path(str(folder.resolve()) + '.lock')
+    except OSError:
+        beside = Path(str(folder) + '.lock')
+    return [folder / '.oauth_refresh.lock', beside]
 
 
-def _refresh_claude_cli_token(path: Path | None = None) -> bool:
-    """Ask Claude Code to renew its expired sign-in: `claude auth status` renews the token in
-    ~/.claude/.credentials.json (no window, no allowance spent, under a second). Claude Code in the
-    Claude desktop app is signed in by the app and never renews that file, so it expires 8 hours after
-    the CLI was last used. An attempt that renews nothing waits CLAUDE_RENEW_GAP before the next, unless
-    the file changes meanwhile."""
+def _take_claude_locks(path: Path) -> list[Path] | None:
+    """Claude Code's renewal locks, all taken, or None while Claude Code is renewing (a lock held and
+    fresh). A stale lock, left by a process that ended, is taken over."""
+    taken: list[Path] = []
+    for lock in _claude_locks(path):
+        try:
+            lock.mkdir()
+        except FileExistsError:
+            try:
+                fresh = time.time() - lock.stat().st_mtime < CLAUDE_LOCK_STALE
+            except OSError:
+                fresh = False
+            if fresh:
+                _give_claude_locks(taken)
+                return None
+            os.utime(lock)                                    # a dead holder's: taken over, as Claude Code does
+        except OSError:
+            _give_claude_locks(taken)
+            return None
+        taken.append(lock)
+    return taken
+
+
+def _give_claude_locks(locks: list[Path]) -> None:
+    for lock in reversed(locks):
+        try:
+            lock.rmdir()
+        except OSError:
+            pass
+
+
+def _refresh_claude_cli_token(path: Path | None = None, post=None) -> bool:
+    """Renew Claude Code's expired sign-in in ~/.claude/.credentials.json as Claude Code itself does:
+    its refresh grant to its sign-in server, under its own refresh locks, the new tokens written back
+    with everything else in the file kept. Claude Code in the Claude desktop app is signed in by the app
+    and never renews that file, so it expires 8 hours after the CLI was last used, and `claude auth
+    status` does not renew it. An attempt that renews nothing waits CLAUDE_RENEW_GAP before the next,
+    unless the file changes meanwhile. True once the file holds a new token."""
     path = path or claude_credentials_path()
+    post = post or _http_json
     mtime = _stat_mtime(path)
     mono = time.monotonic()
     if mono - _claude_renewal['at'] < CLAUDE_RENEW_GAP and mtime == _claude_renewal['mtime']:
         return False
     _claude_renewal['at'] = mono
-    exe = _claude_cli()
-    if not exe:
-        _claude_renewal['mtime'] = mtime
-        return False
-    env = {k: v for k, v in os.environ.items()          # the CLI's own stored sign-in, not a host's
-           if k.upper() == 'CLAUDE_CONFIG_DIR' or not k.upper().startswith(('CLAUDE', 'ANTHROPIC'))}
+    _claude_renewal['mtime'] = mtime
+    locks = _take_claude_locks(path)
+    if locks is None:
+        return False                                          # Claude Code is renewing it right now
     try:
-        subprocess.run([exe, 'auth', 'status', '--json'], capture_output=True, timeout=30, env=env,
-                       creationflags=CREATE_NO_WINDOW)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    after = _stat_mtime(path)
-    _claude_renewal['mtime'] = after
-    return after != mtime
+        try:
+            raw = json.loads(path.read_text('utf-8'))
+        except (OSError, ValueError):
+            return False
+        oauth = raw.get('claudeAiOauth') if isinstance(raw, dict) else None
+        if not isinstance(oauth, dict) or not oauth.get('refreshToken'):
+            return False
+        try:
+            if float(oauth.get('expiresAt') or 0) / 1000 > time.time() + 60:
+                return _stat_mtime(path) != mtime             # renewed by Claude Code meanwhile
+        except (TypeError, ValueError):
+            pass
+        body = {'grant_type': 'refresh_token', 'refresh_token': oauth['refreshToken'],
+                'client_id': oauth.get('clientId') or CLAUDE_CLIENT_ID}
+        if isinstance(oauth.get('scopes'), list) and oauth['scopes']:
+            body['scope'] = ' '.join(str(s) for s in oauth['scopes'])
+        try:
+            answer = post(CLAUDE_TOKEN_URL, method='POST', body=body, timeout=15,
+                          headers={'User-Agent': 'claude-code/2.1.0'})
+        except Exception:
+            return False
+        token = answer.get('access_token') if isinstance(answer, dict) else None
+        try:
+            lasts = float(answer.get('expires_in'))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        if not token or lasts <= 0:
+            return False
+        now_ms = time.time() * 1000
+        oauth['accessToken'] = str(token)
+        oauth['refreshToken'] = str(answer.get('refresh_token') or oauth['refreshToken'])
+        oauth['expiresAt'] = int(now_ms + lasts * 1000)
+        try:
+            oauth['refreshTokenExpiresAt'] = int(now_ms + float(answer['refresh_token_expires_in']) * 1000)
+        except (KeyError, TypeError, ValueError):
+            pass
+        if isinstance(answer.get('scope'), str) and answer['scope'].split():
+            oauth['scopes'] = answer['scope'].split()
+        spare = path.with_name(path.name + '.dockline')
+        try:
+            spare.write_text(json.dumps(raw, separators=(',', ':')), 'utf-8')
+            os.replace(spare, path)
+        except OSError:
+            try:
+                spare.unlink()
+            except OSError:
+                pass
+            return False
+        _claude_renewal['mtime'] = _stat_mtime(path)
+        return True
+    finally:
+        _give_claude_locks(locks)
 
 
 def _claude_sign_in(path: Path) -> tuple[str, str, float | None] | None:
@@ -775,6 +858,10 @@ def fetch_claude(home: Path | None = None, opener=_http_json, renew=None) -> dic
         renewed = True
         if renew():
             found = _claude_sign_in(path) or found
+        elif found[2] <= time.time():
+            # not renewed, and expired: the usage server answers such a token with 429 Too Many
+            # Requests, not 401, which read as a rate limit kept a 13-hour-old reading without a word
+            return _empty_state(True, CLAUDE_EXPIRED)
     token, plan_raw, _ = found
     if not token:
         return _empty_state(False)
@@ -1686,7 +1773,8 @@ class AIUsage(QObject):
                 wait = exc.retry_after if exc.retry_after is not None else RATE_LIMIT_WAIT
                 self._backoff_until[provider] = mono + wait
                 if previous.get('connected') and previous.get('windows'):
-                    updated[provider] = {**previous, 'error': ''}
+                    old = time.time() - float(previous.get('updated_at') or 0) > RATE_LIMIT_SAY
+                    updated[provider] = {**previous, 'error': RATE_LIMITED if old else ''}
                 else:
                     updated[provider] = _empty_state(True, 'Rate-limited — will retry shortly.')
                 continue

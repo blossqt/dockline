@@ -981,39 +981,84 @@ class AIUsageTests(Temp):
         self.assertEqual(state['error'], ai.CLAUDE_EXPIRED)
         self.assertEqual(len(renewals), 1)                  # tried once, not again on the refusal
 
-    def test_claude_renewal_runs_the_cli_without_host_sign_in_and_waits_after_failing(self):
-        import subprocess
+    def test_claude_renewal_uses_claude_codes_refresh_grant_under_its_locks(self):
+        """An expired sign-in renewed as Claude Code renews it: its refresh grant, its locks held while
+        asking, the new tokens written back with the rest of the file kept; a refusal waits the gap,
+        and a lock Claude Code holds now leaves the renewal to it."""
+        import json
+        import time
         from unittest import mock
         from dockline import ai
         path = self.write_claude('old', -3600)
-        runs = []
-        works = [False]
+        raw = json.loads(path.read_text('utf-8'))
+        raw['claudeAiOauth'].update(refreshToken='r1', scopes=['user:inference', 'user:profile'],
+                                    subscriptionType='pro', rateLimitTier='default_claude_ai')
+        path.write_text(json.dumps(raw, separators=(',', ':')), 'utf-8')
+        asked = []
+        answers = [ai._HttpStatus(400)]
 
-        def run(args, **kwargs):
-            runs.append((args, kwargs['env']))
-            if works[0]:
-                self.write_claude('new', 8 * 3600)
-                os.utime(path, (1e9 + len(runs), 1e9 + len(runs)))
-            return subprocess.CompletedProcess(args, 0, '', '')
+        def post(url, method='GET', headers=None, body=None, timeout=8):
+            asked.append((url, method, dict(body), [lock.is_dir() for lock in ai._claude_locks(path)]))
+            answer = answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
 
-        host = {'CLAUDE_CODE_OAUTH_TOKEN': 'host', 'ANTHROPIC_BASE_URL': 'http://localhost:1',
-                'CLAUDE_CONFIG_DIR': str(self.folder / '.claude')}
-        with mock.patch.dict(ai._claude_renewal, {'at': -1e9, 'mtime': -1.0}), \
-                mock.patch.dict(os.environ, host), \
-                mock.patch.object(ai, '_claude_cli', lambda: r'C:\x\claude.exe'), \
-                mock.patch.object(ai.subprocess, 'run', run):
-            self.assertFalse(ai._refresh_claude_cli_token(path))         # ran, renewed nothing
-            self.assertEqual(runs[0][0], [r'C:\x\claude.exe', 'auth', 'status', '--json'])
-            env = runs[0][1]
-            self.assertNotIn('CLAUDE_CODE_OAUTH_TOKEN', env)
-            self.assertNotIn('ANTHROPIC_BASE_URL', env)
-            self.assertEqual(env['CLAUDE_CONFIG_DIR'], host['CLAUDE_CONFIG_DIR'])
-            self.assertFalse(ai._refresh_claude_cli_token(path))         # too soon: not run again
-            self.assertEqual(len(runs), 1)
-            os.utime(path, (1e9, 1e9))                                  # signed in again meanwhile
-            works[0] = True
-            self.assertTrue(ai._refresh_claude_cli_token(path))
-            self.assertEqual(len(runs), 2)
+        with mock.patch.dict(ai._claude_renewal, {'at': -1e9, 'mtime': -1.0}):
+            self.assertFalse(ai._refresh_claude_cli_token(path, post))          # refused: signed out
+            self.assertEqual(asked[0][:3], (ai.CLAUDE_TOKEN_URL, 'POST', {
+                'grant_type': 'refresh_token', 'refresh_token': 'r1', 'client_id': ai.CLAUDE_CLIENT_ID,
+                'scope': 'user:inference user:profile'}))
+            self.assertEqual(asked[0][3], [True, True])                        # under Claude Code's locks
+            self.assertEqual([lock.exists() for lock in ai._claude_locks(path)], [False, False])
+            self.assertFalse(ai._refresh_claude_cli_token(path, post))          # too soon: not asked again
+            self.assertEqual(len(asked), 1)
+
+            _claude_lock = ai._claude_locks(path)[0]
+            _claude_lock.mkdir()                                                # Claude Code renewing now
+            os.utime(path, (1e9, 1e9))                                          # the file changed: try again
+            self.assertFalse(ai._refresh_claude_cli_token(path, post))
+            self.assertEqual(len(asked), 1)
+            self.assertTrue(_claude_lock.is_dir())                              # its lock left alone
+            os.utime(_claude_lock, (time.time() - 120, time.time() - 120))      # its holder ended long ago
+            os.utime(path, (1e9 + 1, 1e9 + 1))
+            answers.append({'access_token': 'new', 'refresh_token': 'r2', 'expires_in': 28800,
+                            'scope': 'user:inference user:profile'})
+            self.assertTrue(ai._refresh_claude_cli_token(path, post))
+            oauth = json.loads(path.read_text('utf-8'))['claudeAiOauth']
+            self.assertEqual((oauth['accessToken'], oauth['refreshToken']), ('new', 'r2'))
+            self.assertAlmostEqual(oauth['expiresAt'] / 1000, time.time() + 28800, delta=5)
+            self.assertEqual((oauth['subscriptionType'], oauth['rateLimitTier']), ('pro', 'default_claude_ai'))
+            self.assertEqual([lock.exists() for lock in ai._claude_locks(path)], [False, False])
+            self.assertFalse(path.with_name(path.name + '.dockline').exists())
+
+    def test_expired_claude_sign_in_is_said_not_read_as_a_rate_limit(self):
+        """Not renewed and expired: the card says so, with no request (the server answers it with 429).
+        A reading kept through rate limits for long says why it is not newer."""
+        import time
+        from dockline import ai
+        self.write_claude('old', -3600)
+        asked = []
+        state = ai.fetch_claude(self.folder, lambda *a, **k: asked.append(1), lambda: False)
+        self.assertEqual((state['error'], asked), (ai.CLAUDE_EXPIRED, []))
+
+        tracker = ai.AIUsage(Config(None), testing=True, home=self.folder)
+        tracker.latest = {'claude': {'connected': True, 'signed_in': True, 'plan': 'Pro', 'error': '',
+                                     'windows': [{'key': 'weekly', 'label': 'Weekly', 'used': 55.0,
+                                                  'resets_at': None}],
+                                     'updated_at': time.time() - 3600}}
+
+        def limited(**_):
+            raise ai._RateLimited(600)
+
+        real = ai.FETCHERS['claude']
+        ai.FETCHERS['claude'] = limited
+        try:
+            got = tracker._collect(force=True, providers=['claude'])
+        finally:
+            ai.FETCHERS['claude'] = real
+        self.assertEqual(got['claude']['error'], ai.RATE_LIMITED)
+        self.assertEqual(got['claude']['windows'][0]['used'], 55.0)
 
     def test_parsers_and_reset_timers(self):
         import json
