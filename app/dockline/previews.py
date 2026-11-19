@@ -7,7 +7,11 @@ Windows' own preview pop-up can't be used: it belongs to the taskbar, which Dock
 Windows' own peek (DwmpActivateLivePreview): it draws the peeked window over every other one - the
 dock and the previews included (seen on screen, 2026-11-17); only the taskbar itself is let through.
 So the peek is drawn here (PeekLayer): a layer over the screen, under the dock and the previews, with
-the screen dimmed and the window's live picture where the window is."""
+the screen dimmed and the window's live picture where the window is.
+
+Moving along the dock, the panel glides from one app to the next and the new previews fade in
+(thumbnails through DWM's own opacity). In the Glass style it is frosted as the cards are: the
+screen behind it blurred, taken once as a band across the screen before it shows, so it can slide."""
 
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from . import look as L
-from . import win
+from . import motion, win
 
 dwmapi = ctypes.WinDLL('dwmapi')
 
@@ -168,7 +172,9 @@ PEEK_AFTER = 400        # ms resting on a preview before its window is shown alo
 
 class Previews(QWidget):
     """The panel of one app's windows. Not see-through: Windows draws live window pictures only
-    into an ordinary (not layered) window."""
+    into an ordinary (not layered) window. Its glass is painted (look.frosted_band)."""
+
+    RADIUS = 8                                   # Windows' own rounded corners (DWMWCP_ROUND)
 
     def __init__(self, strip):
         super().__init__(None, Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint |
@@ -189,6 +195,10 @@ class Previews(QWidget):
         self.peek_soon.setSingleShot(True)
         self.peek_soon.setInterval(PEEK_AFTER)
         self.peek_soon.timeout.connect(self.start_peek)
+        self.reveal = 1.0                         # how far the previews shown have faded in
+        self.band: QPixmap | None = None          # the Glass style: the screen behind, along the panel's row
+        self.band_at = QPoint()
+        self._glide = None
 
     # -- showing
     def show_for(self, index: int) -> None:
@@ -201,6 +211,8 @@ class Previews(QWidget):
             return
         if index == self.index and self.isVisible() and [w.hwnd for w in windows] == [w.hwnd for w in self.windows]:
             return
+        was = self.geometry() if self.isVisible() else None
+        moving = was is not None and index != self.index
         self.drop_thumbs()
         self.index = index
         self.windows = windows
@@ -217,13 +229,70 @@ class Previews(QWidget):
         x = max(screen.left() + 8, min(centre - width // 2, screen.right() - width - 8))
         top = dock.mapToGlobal(QPoint(0, 0)).y()
         y = top + dock.height() + ABOVE if dock.edge == 'top' else top - ABOVE - height
-        self.setGeometry(x, y, width, height)
+        target = QRect(x, y, width, height)
+        self.stop_glide()
+        if was is None:
+            self.take_band(QRect(screen.left(), y, screen.width(), height))
+        if not moving:
+            self.setGeometry(target)
         self.show()
         win.round_corners(int(self.winId()), True)
+        animate = motion.on() and not dock.testing
+        self.reveal = 0.0 if animate else 1.0
         self.register_thumbs()
+        if animate:
+            start = QRect(was) if moving else QRect(target)
+            fade = 2.0 if moving else 1.0               # gliding to another app: in by halfway
+
+            def step(progress):
+                if moving:
+                    self.setGeometry(QRect(round(start.x() + (target.x() - start.x()) * progress), target.y(),
+                                           round(start.width() + (target.width() - start.width()) * progress),
+                                           target.height()))
+                self.set_reveal(min(1.0, progress * fade))
+
+            def done():
+                self._glide = None
+                self.setGeometry(target)
+                self.set_reveal(1.0)
+
+            self._glide = motion.run(self, motion.SLIDE_MS if moving else motion.HOVER_MS, step, done)
+        else:
+            self.setGeometry(target)
         self.update()
         if not dock.testing:
             self.clear_shell()
+
+    def stop_glide(self) -> None:
+        if self._glide is not None:
+            try:
+                self._glide.stop()
+            except RuntimeError:
+                pass
+            self._glide = None
+
+    def set_reveal(self, reveal: float) -> None:
+        """The previews' content faded in this far: titles drawn, and DWM's thumbnails, as clear."""
+        self.reveal = reveal
+        props = _ThumbProps()
+        props.dwFlags = OPACITY
+        props.opacity = round(255 * reveal)
+        for thumb in self.thumbs:
+            if thumb:
+                dwmapi.DwmUpdateThumbnailProperties(thumb, ctypes.byref(props))
+        self.update()
+
+    def take_band(self, band: QRect) -> None:
+        """Before the panel shows: the screen behind its row, blurred, without the dock's magnified
+        icons (they shrink back as it opens)."""
+        self.band = None
+        look = self.strip.look
+        if not look.glass or self.strip.dock.testing:
+            return
+        layer = getattr(self.strip, '_magnifier', None)
+        keep_out = layer.geometry() if layer is not None and layer.isVisible() else None
+        self.band = L.frosted_band(band, keep_out)
+        self.band_at = band.topLeft()
 
     def clear_shell(self) -> None:
         """Start or Search is in front and covers the panel (Start opened to bring the dock up over a
@@ -260,7 +329,7 @@ class Previews(QWidget):
             props.dwFlags = RECT_DESTINATION | OPACITY | VISIBLE | CLIENT_ONLY
             props.rcDestination = wintypes.RECT(round(area.left() * ratio), round(area.top() * ratio),
                                                 round((area.right() + 1) * ratio), round((area.bottom() + 1) * ratio))
-            props.opacity = 255
+            props.opacity = round(255 * self.reveal)
             props.fVisible = True
             props.fSourceClientAreaOnly = False
             dwmapi.DwmUpdateThumbnailProperties(thumb, ctypes.byref(props))
@@ -294,10 +363,12 @@ class Previews(QWidget):
             peek(False)
 
     def close_now(self) -> None:
+        self.stop_glide()
         self.end_peek()
         self.drop_thumbs()
         self.index = -1
         self.windows = []
+        self.band = None
         self.hide()
 
     def leave_soon(self) -> None:
@@ -310,10 +381,23 @@ class Previews(QWidget):
         painter.setRenderHint(QPainter.Antialiasing)
         look = self.strip.look
         dark = look.dark
-        painter.fillRect(self.rect(), QColor(32, 32, 38) if dark else QColor(246, 246, 248))
-        text = QColor('#f4f4f5' if dark else '#18181b')
+        glass = self.band is not None and look.glass
+        if glass:                                            # the cards' glass: the screen behind, frosted
+            painter.fillRect(self.rect(), QColor(32, 32, 38) if dark else QColor(246, 246, 248))
+            here = self.mapToGlobal(QPoint(0, 0)) - self.band_at
+            ratio = self.band.devicePixelRatio()
+            painter.drawPixmap(QRectF(self.rect()), self.band,
+                               QRectF(here.x() * ratio, here.y() * ratio, self.width() * ratio, self.height() * ratio))
+            pane = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            L.paint_clear_glass(painter, pane, self.RADIUS, self.strip.dock.panel_fill(), dark)
+            text = look.c(look.text)
+        else:
+            painter.fillRect(self.rect(), QColor(32, 32, 38) if dark else QColor(246, 246, 248))
+            text = QColor('#f4f4f5' if dark else '#18181b')
+        painter.setOpacity(self.reveal)
         halo = L.HALO
-        L.HALO = None                                        # solid ground here: no halo needed
+        if not glass:
+            L.HALO = None                                    # solid ground here: no halo needed
         try:
             for i, window in enumerate(self.windows):
                 box = QRectF(self.box(i))
@@ -329,9 +413,11 @@ class Previews(QWidget):
                     L.text(painter, box.adjusted(0, TITLE_H, 0, 0), 'No preview', QColor(140, 140, 150), 12)
         finally:
             L.HALO = halo
-        painter.setPen(QPen(QColor(255, 255, 255, 40) if dark else QColor(0, 0, 0, 30), 1))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+        painter.setOpacity(1.0)
+        if not glass:
+            painter.setPen(QPen(QColor(255, 255, 255, 40) if dark else QColor(0, 0, 0, 30), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
 
     def close_box(self, i: int) -> QRectF:
         box = self.box(i)

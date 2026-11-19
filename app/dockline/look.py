@@ -264,15 +264,59 @@ def frosted_behind(where) -> QPixmap | None:
     shot = screen.grabWindow(0, where.x() - area.x(), where.y() - area.y(), where.width(), where.height())
     if shot.isNull():
         return None
-    image = shot.toImage()
+    return _frost(shot.toImage(), shot.devicePixelRatio())
+
+
+def _frost(image, ratio: float) -> QPixmap:
     size = image.size()
     small = image.scaled(max(1, size.width() // 4), max(1, size.height() // 4), Qt.IgnoreAspectRatio,
                          Qt.SmoothTransformation)
     small = small.scaled(max(1, size.width() // 14), max(1, size.height() // 14), Qt.IgnoreAspectRatio,
                          Qt.SmoothTransformation)
     blurred = QPixmap.fromImage(small.scaled(size, Qt.IgnoreAspectRatio, Qt.SmoothTransformation))
-    blurred.setDevicePixelRatio(shot.devicePixelRatio())
+    blurred.setDevicePixelRatio(ratio)
     return blurred
+
+
+def frosted_band(where, keep_out=None) -> QPixmap | None:
+    """frosted_behind for a band across the screen (global rect), for a pop-up that moves along it
+    (the previews, sliding from app to app): taken once, before the pop-up is on screen. The rows
+    keep_out covers (a layer of the dock's own over part of the band: the magnified icons and their
+    name) are left out, and the rows beside them carried over them, so the blur never holds them."""
+    from PySide6.QtGui import QGuiApplication, QImage
+    screen = QGuiApplication.screenAt(where.center()) or QGuiApplication.primaryScreen()
+    if screen is None or where.width() <= 0 or where.height() <= 0:
+        return None
+    top, bottom = where.top(), where.top() + where.height()          # rows taken: [top, bottom)
+    if keep_out is not None and keep_out.isValid() and keep_out.top() < bottom and keep_out.bottom() + 1 > top:
+        if keep_out.top() > top:
+            bottom = keep_out.top()                                  # it covers the band's foot
+        else:
+            top = keep_out.bottom() + 1                              # or its head
+        if bottom - top < 4:
+            return None
+    area = screen.geometry()
+    shot = screen.grabWindow(0, where.x() - area.x(), top - area.y(), where.width(), bottom - top)
+    if shot.isNull():
+        return None
+    ratio = shot.devicePixelRatio()
+    taken = shot.toImage()
+    if (top, bottom) == (where.top(), where.top() + where.height()):
+        return _frost(taken, ratio)
+    whole = QImage(round(where.width() * ratio), round(where.height() * ratio), QImage.Format_ARGB32_Premultiplied)
+    whole.fill(Qt.transparent)
+    painter = QPainter(whole)
+    offset = round((top - where.top()) * ratio)
+    painter.drawImage(0, offset, taken)
+    edge_row = 0 if offset > 0 else taken.height() - 1               # the row next to what was left out
+    edge = taken.copy(0, edge_row, taken.width(), 1)
+    if offset > 0:
+        painter.drawImage(QRectF(0, 0, whole.width(), offset), edge)
+    else:
+        rest = taken.height()
+        painter.drawImage(QRectF(0, rest, whole.width(), whole.height() - rest), edge)
+    painter.end()
+    return _frost(whole, ratio)
 
 
 def paint_backdrop(painter: QPainter, rect: QRectF, radius: float, backdrop) -> None:

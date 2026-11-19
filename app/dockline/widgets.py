@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import webbrowser
 import winreg
+from typing import NamedTuple
 
 from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QTextCursor
@@ -157,6 +158,22 @@ class Tile(QWidget):
 
         setattr(self, holder, motion.run(self, ms, step, easing=QEasingCurve(QEasingCurve.OutCubic)))
 
+    def eased(self, key, value: float) -> float:
+        """A reading as painted: gliding to each new one rather than jumping (motion.Glides)."""
+        glides = getattr(self, '_glides', None)
+        if glides is None:
+            glides = self._glides = motion.Glides(self)
+        return glides(key, value)
+
+    def roll(self, key) -> motion.Roll:
+        """Figures painted under key, rolling to each new value (motion.Roll)."""
+        rolls = getattr(self, '_rolls', None)
+        if rolls is None:
+            rolls = self._rolls = {}
+        if key not in rolls:
+            rolls[key] = motion.Roll(self)
+        return rolls[key]
+
     # -- helpers
     @property
     def look(self) -> L.Look:
@@ -165,16 +182,23 @@ class Tile(QWidget):
     def sizes(self) -> tuple[int, int]:
         return L.TEXT[self.dock.cfg['size']]
 
-    def lines(self, painter, rect: QRectF, main: str, sub: str, align=Qt.AlignLeft) -> None:
+    def lines(self, painter, rect: QRectF, main: str, sub: str, align=Qt.AlignLeft, roll=None) -> None:
+        """A reading and a line under it; with roll (a key), the reading's figures roll as it changes."""
         big, small = self.sizes()
         look = self.look
         if not sub:
-            L.text(painter, rect, main, look.c(look.text), big, 600, align | Qt.AlignVCenter)
+            if roll is not None:
+                self.roll(roll).paint(painter, rect, main, look.c(look.text), big, 600, align)
+            else:
+                L.text(painter, rect, main, look.c(look.text), big, 600, align | Qt.AlignVCenter)
             return
         height = big * 1.22 + small * 1.22
         top = rect.center().y() - height / 2
-        L.text(painter, QRectF(rect.x(), top, rect.width(), big * 1.25), main, look.c(look.text), big, 600,
-               align | Qt.AlignVCenter)
+        main_rect = QRectF(rect.x(), top, rect.width(), big * 1.25)
+        if roll is not None:
+            self.roll(roll).paint(painter, main_rect, main, look.c(look.text), big, 600, align)
+        else:
+            L.text(painter, main_rect, main, look.c(look.text), big, 600, align | Qt.AlignVCenter)
         L.text(painter, QRectF(rect.x(), top + big * 1.22, rect.width(), small * 1.3), sub, look.c(look.sub),
                small, 400, align | Qt.AlignVCenter)
 
@@ -186,13 +210,16 @@ class Tile(QWidget):
                                    side), main, sub)
 
     def ring_and_lines(self, painter, rect: QRectF, share: float, main: str, sub: str) -> None:
+        """A gauge gliding to each reading, its figures rolling, and a line under them."""
+        share = self.eased('ring', share)
         side = rect.height()
         ring_side = side * 0.62
         ring_rect = QRectF(rect.x() + (side - ring_side) / 2, rect.center().y() - ring_side / 2, ring_side,
                            ring_side)
         L.ring(painter, ring_rect, share, self.look.c(self.look.accent), self.look.c(self.look.track),
                max(3.0, side * 0.08))
-        self.lines(painter, QRectF(rect.x() + side - 2, rect.y(), rect.width() - side - 4, side), main, sub)
+        self.lines(painter, QRectF(rect.x() + side - 2, rect.y(), rect.width() - side - 4, side), main, sub,
+                   roll='ring')
 
     def open_card(self, content: QWidget, width: int = 300) -> None:
         if self.dock.editing or Card.just_closed(self):
@@ -361,6 +388,14 @@ class StartTile(Tile):
         win.press(win.VK_LWIN)
 
 
+class Shown(NamedTuple):
+    """One app as the strip shows it."""
+    key: str
+    group: win.Group
+    index: int            # its place in AppsTile.groups, or -1 while it leaves
+    presence: float       # 0 gone to 1 in its place, as it comes or goes
+
+
 class AppsTile(Tile):
     ID, NAME, GROUP = 'apps', 'Apps', 'Apps & Files'
     ABOUT = 'Pinned apps and every open window. Click to switch, drag to rearrange, right-click to pin or close.'
@@ -384,8 +419,20 @@ class AppsTile(Tile):
         self.dragged: str | None = None           # the icon being dragged
         self.drag_x = 0.0
         self.grab_x = 0.0
-        self.settler = QTimer(self)
-        self.settler.timeout.connect(self.settle)
+        self.animator = QTimer(self)              # one clock for all that moves on the strip, run only then
+        self.animator.timeout.connect(self.frame)
+        self.leaving: dict[str, list] = {}        # apps whose last window closed: [group, the key it follows]
+        self.presence: dict[str, float] = {}      # apps coming or going, 0 to 1 (all others are 1)
+        self.changes: dict[str, tuple] = {}       # their moves: (start, from, to, ms)
+        self.settling = False                     # icons sliding to their places around a dragged one
+        self.launches: dict[str, dict] = {}       # apps started from the dock, until a window of theirs shows
+        self.hops: dict[str, float] = {}          # when each started app's icon began to hop
+        self.flash_at: dict[int, float] = {}      # when each window began asking for attention
+        self.bars = motion.Glides(self, motion.HOVER_MS)     # the bar under the app in front widening
+        self.torn = False                         # the dragged icon is away from the dock
+        self.landing: str | None = None           # the dragged icon settling back in, still lifted
+        self._lift = None
+        self.held = QPointF()                     # where the dragged icon was taken, from its centre
         self.flashing: set[int] = set()           # windows asking for attention, as the taskbar shows them
         self.dwell = QTimer(self)                 # resting on an app: its windows' previews
         self.dwell.setSingleShot(True)
@@ -410,22 +457,30 @@ class AppsTile(Tile):
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.refresh()
 
-    def wanted(self, count: int, scale: float = 1.0) -> int:
-        count = max(1, count)
+    def weight(self) -> float:
+        """How many apps the strip makes room for: those coming or going count as far as they are."""
+        if not self.presence and not self.leaving:
+            return float(len(self.groups))
+        return sum(entry.presence for entry in self.display())
+
+    def wanted(self, count: float, scale: float = 1.0) -> int:
+        count = max(1.0, count)
         return round(count * self.dock.tile_height * scale + (count - 1) * self.GAP)
 
     def sizeHint(self):
-        return QSize(self.wanted(len(self.groups)), self.dock.tile_height)
+        return QSize(self.wanted(self.weight()), self.dock.tile_height)
 
     def minimumSizeHint(self):
-        return QSize(self.wanted(len(self.groups), 0.6), self.dock.tile_height)
+        return QSize(self.wanted(self.weight(), 0.6), self.dock.tile_height)
 
     @property
     def slot(self) -> float:
         """Each app's tile: square at the tile height, smaller when the dock is short of room."""
-        count = max(1, len(self.groups))
+        count = max(1.0, self.weight())
         room = (self.width() - self.GAP * (count - 1)) / count
-        return min(float(self.dock.tile_height), max(self.dock.tile_height * 0.6, room))
+        if room >= self.dock.tile_height - 1:          # a pixel short as apps come or go: no wobble
+            return float(self.dock.tile_height)
+        return max(self.dock.tile_height * 0.6, room)
 
     def offset(self) -> float:
         return 0.0
@@ -454,11 +509,17 @@ class AppsTile(Tile):
         self.dock.keep_magnifier()
 
     def retire(self):
+        self.animator.stop()
         layer = getattr(self, '_magnifier', None)
         if layer is not None:
             layer.close()
             layer.deleteLater()
             self._magnifier = None
+        if self._lift is not None:
+            self._lift.stop()
+            self._lift.close()
+            self._lift.deleteLater()
+            self._lift = None
         if self._previews is not None:
             self._previews.close_now()
             self._previews.deleteLater()
@@ -491,26 +552,197 @@ class AppsTile(Tile):
 
     def flash(self, hwnd: int, on: bool = True) -> None:
         if on and hwnd != win.foreground():
+            if hwnd not in self.flashing:
+                self.flash_at[hwnd] = time.perf_counter()
             self.flashing.add(hwnd)
+            self.kick()
         else:
             self.flashing.discard(hwnd)
+            self.flash_at.pop(hwnd, None)
         self.update()
 
     def new_window(self, index: int) -> None:
         """Middle-click or Shift+click: another window of the app, as on the taskbar."""
         if 0 <= index < len(self.groups) and self.groups[index].path:
             _open(self.groups[index].path)
+            self.launch(self.keys[index])
+
+    # -- starting an app: its icon hops in its tile and its dot breathes until a window shows
+    def launch(self, key: str) -> None:
+        group = dict(zip(self.keys, self.groups)).get(key)
+        if group is None:
+            return
+        now = time.perf_counter()
+        self.launches[key] = {'at': now, 'count': len(group.windows),
+                              'known': {w.hwnd for g in self.groups for w in g.windows}}
+        if motion.on():
+            self.hops[key] = now
+        self.kick()
+        self.update()
+
+    def end_launches(self) -> None:
+        """A started app is no longer shown as starting once a new window of its own shows, once a
+        window that was not open before comes to the front (one started through a launcher, as
+        Discord's, belongs to another program), or after LAUNCH_MOST seconds."""
+        if not self.launches:
+            return
+        now = time.perf_counter()
+        by_key = dict(zip(self.keys, self.groups))
+        newest = max(self.launches, key=lambda key: self.launches[key]['at'])
+        shown = {w.hwnd for g in self.groups for w in g.windows}
+        for key, started in list(self.launches.items()):
+            group = by_key.get(key)
+            if group is None or now - started['at'] > motion.LAUNCH_MOST or len(group.windows) > started['count'] \
+                    or (key == newest and self.front in shown and self.front not in started['known']):
+                del self.launches[key]
 
     def rest_x(self, index: int) -> float:
         return index * (self.slot + self.GAP)
 
-    def rects(self) -> list[QRectF]:
-        """Each app's tile where it is drawn, in this strip."""
+    def display(self) -> list[Shown]:
+        """The apps as shown, in order: the open and pinned ones, and those leaving, where they were."""
+        live = [Shown(key, group, i, self.presence.get(key, 1.0))
+                for i, (key, group) in enumerate(zip(self.keys, self.groups))]
+        if not self.leaving:
+            return live
+        after: dict = {}
+        for key, (group, anchor) in self.leaving.items():
+            after.setdefault(anchor, []).append(Shown(key, group, -1, self.presence.get(key, 0.0)))
+        out: list[Shown] = []
+
+        def emit(entry):
+            out.append(entry)
+            for follower in after.pop(entry.key, []):
+                emit(follower)
+
+        for follower in after.pop(None, []):
+            emit(follower)
+        for entry in live:
+            emit(entry)
+        for followers in list(after.values()):        # after an app no longer shown: at the end
+            for follower in followers:
+                emit(follower)
+        return out
+
+    def placed(self) -> list[tuple[Shown, QRectF]]:
+        """Each app shown with its tile in this strip; while magnified, where the magnifier draws it.
+        One coming or going takes that share of its room, drawn that much of its size."""
         if self.magnified():
-            return self._magnifier.rects()
+            return self._magnifier.placed()
         slot = self.slot
         top = (self.height() - slot) / 2
-        return [QRectF(self.shown.get(key, self.rest_x(i)), top, slot, slot) for i, key in enumerate(self.keys)]
+        out, x = [], 0.0
+        for entry in self.display():
+            left = self.shown.get(entry.key, x)
+            size = slot * entry.presence
+            out.append((entry, QRectF(left, top + (slot - size) / 2, size, size)))
+            x += (slot + self.GAP) * entry.presence
+        return out
+
+    def rects(self) -> list[QRectF]:
+        """Each open or pinned app's tile where it is drawn, in this strip."""
+        return [rect for entry, rect in self.placed() if entry.index >= 0]
+
+    def targets(self) -> dict[str, float]:
+        """Where each app's tile rests, from the strip's left."""
+        out, x = {}, 0.0
+        slot = self.slot
+        for entry in self.display():
+            out[entry.key] = x
+            x += (slot + self.GAP) * entry.presence
+        return out
+
+    # -- apps coming and going: new ones grow in, closed ones shrink away, the others make room
+    def can_move(self) -> bool:
+        return motion.on() and self.isVisible() and self.dragged is None and not getattr(self.dock, 'tucked', False)
+
+    def change(self, key: str, start: float, to: float, ms: int, now: float) -> None:
+        self.presence[key] = start
+        self.changes[key] = (now, start, to, ms)
+
+    def move_apps(self, before: list[str], old_keys: list[str], old_groups: dict) -> None:
+        """Apps came or went. New ones grow in where they belong and the others make room; closed
+        ones shrink away where they were and the others close the gap. The dock grows and shrinks
+        with them frame by frame (frame), so every icon keeps its size meanwhile: with the dock
+        left to catch up, all of them shrank for a moment as one came."""
+        now = time.perf_counter()
+        live = set(self.keys)
+        old = set(old_keys)
+        for key in self.keys:
+            if key not in old:
+                self.leaving.pop(key, None)
+                self.change(key, self.presence.get(key, 0.0), 1.0, motion.OPEN_MS, now)
+        for i, key in enumerate(before):
+            if key in live or key in self.leaving or key not in old_groups:
+                continue
+            anchor = next((k for k in reversed(before[:i]) if k in live or k in self.leaving), None)
+            self.leaving[key] = [old_groups[key], anchor]
+            self.change(key, self.presence.get(key, 1.0), 0.0, motion.CLOSE_MS, now)
+        self.kick()
+
+    def settle_apps(self) -> None:
+        """Whatever is coming or going, at once where it ends (a drag begins, the dock is away)."""
+        if not (self.changes or self.presence or self.leaving):
+            return
+        self.changes.clear()
+        self.presence.clear()
+        self.leaving.clear()
+        self.updateGeometry()
+        self.dock.fit_soon()
+
+    def gone(self, key: str) -> None:
+        _group, anchor = self.leaving.pop(key)
+        self.presence.pop(key, None)
+        for other in self.leaving.values():          # those that followed it follow what it followed
+            if other[1] == key:
+                other[1] = anchor
+
+    def pulsing(self, now: float) -> bool:
+        return any(now - at < motion.PULSE * motion.PULSES for at in self.flash_at.values())
+
+    def kick(self) -> None:
+        """The strip's clock: at the screen's rate while something moves, slower while something only
+        pulses or breathes, stopped when nothing does."""
+        now = time.perf_counter()
+        hopping = any(now - at < motion.HOP_MS / 1000 for at in self.hops.values())
+        if self.changes or self.settling or hopping:
+            interval = max(4, theme_frame())
+        elif motion.on() and (self.launches or self.pulsing(now)):
+            interval = motion.PULSE_EVERY
+        else:
+            self.animator.stop()
+            return
+        if not self.animator.isActive():
+            self.last_frame = now
+            self.animator.start(interval)
+        elif self.animator.interval() != interval:
+            self.animator.setInterval(interval)
+
+    def frame(self) -> None:
+        now = time.perf_counter()
+        frames = min(4.0, (now - self.last_frame) * 60)
+        self.last_frame = now
+        if self.changes:
+            for key, (start, low, high, ms) in list(self.changes.items()):
+                t = (now - start) * 1000 / ms
+                if t < 1.0:
+                    self.presence[key] = low + (high - low) * motion.ease(t)
+                    continue
+                del self.changes[key]
+                if high >= 1.0:
+                    self.presence.pop(key, None)
+                elif key in self.leaving:
+                    self.gone(key)
+                else:
+                    self.presence[key] = 0.0         # the dragged icon, away from the dock
+            self.updateGeometry()
+            self.dock.fit_now()
+        if self.settling:
+            self.settle(frames)
+        self.hops = {key: at for key, at in self.hops.items() if now - at < motion.HOP_MS / 1000}
+        self.end_launches()
+        self.update()
+        self.kick()
 
     def name_of(self, index: int) -> str:
         if not 0 <= index < len(self.groups):
@@ -546,18 +778,29 @@ class AppsTile(Tile):
         keys = [key for key in self.order if key in groups]
         keys += [key for key in groups if key not in keys]
         self.order = keys + [key for key in self.order if key not in groups]   # remembered while closed
+        old_keys, old_groups = self.keys, dict(zip(self.keys, self.groups))
+        before = [entry.key for entry in self.display()]
         self.keys = keys
         self.groups = [groups[key] for key in keys]
         self.front = win.foreground()
         alive = {w.hwnd for w in windows}
         self.flashing = {hwnd for hwnd in self.flashing if hwnd in alive and hwnd != self.front}
+        self.flash_at = {hwnd: at for hwnd, at in self.flash_at.items() if hwnd in self.flashing}
+        self.end_launches()
         signature = (tuple((key, len(groups[key].windows)) for key in keys), self.front, frozenset(self.flashing))
         if signature != self.signature:
+            came_or_went = self.signature is not None and set(keys) != set(old_keys)
             count_changed = self.signature is None or len(self.signature[0]) != len(keys)
             self.signature = signature
-            if count_changed:
-                self.updateGeometry()
-                self.dock.fit_soon()
+            if came_or_went and self.can_move():
+                self.move_apps(before, old_keys, old_groups)
+            else:
+                if came_or_went:
+                    self.settle_apps()
+                if count_changed:
+                    self.updateGeometry()
+                    self.dock.fit_soon()
+            self.bars.forget(set(keys) | set(self.leaving))
             self.update()
 
     ICON = 0.62                  # an icon's share of its tile
@@ -591,19 +834,34 @@ class AppsTile(Tile):
         return -1
 
     def paint_app(self, painter: QPainter, index: int, rect: QRectF) -> None:
-        """One app in its glass tile: hovered or in front lit, a dot while it has windows."""
+        self.paint_entry(painter, Shown(self.keys[index], self.groups[index], index, 1.0), rect)
+
+    def paint_entry(self, painter: QPainter, entry: Shown, rect: QRectF, lifted: bool = False) -> None:
+        """One app in its glass tile: hovered or in front lit, a bar under it while it has windows
+        (wider and in the accent for the one in front). Coming or going, it fades with its size;
+        started, its icon hops and its bar breathes; asking for attention, it pulses, then holds."""
+        if rect.width() < 0.5:
+            return
         look = self.look
-        group = self.groups[index]
+        group, key, index = entry.group, entry.key, entry.index
+        now = time.perf_counter()
+        painter.save()
+        if not lifted:
+            painter.setOpacity(painter.opacity() * max(0.0, min(1.0, entry.presence)))
         focused = any(w.hwnd == self.front for w in group.windows)
         radius = rect.width() * 0.2
         fill = look.c(look.tile)
-        if index == self.hover_index or self.keys[index] == self.dragged:
-            fill = motion.mix(fill, look.c(look.hover), 1.0 if self.keys[index] == self.dragged else self.lit)
+        if lifted:
+            fill = look.c(look.hover)
+        elif index >= 0 and index == self.hover_index:
+            fill = motion.mix(fill, look.c(look.hover), self.lit)
         elif focused:
             fill = look.c(look.hover)
-        if any(w.hwnd in self.flashing for w in group.windows):
-            fill = QColor(255, 166, 64, 150)              # asking for attention, as the taskbar shows it
-        if self.keys[index] == self.dragged:
+        asking = [self.flash_at.get(w.hwnd, now - 60) for w in group.windows if w.hwnd in self.flashing]
+        if asking:                                     # as the taskbar shows it: a few pulses, then held
+            level = motion.pulse(now - min(asking)) if motion.on() else 1.0
+            fill = motion.mix(fill, QColor(255, 166, 64, 150), level)
+        if lifted:
             painter.setPen(QPen(L.chip(look), 1))
         elif look.glass:
             painter.setPen(Qt.NoPen)                     # clear tiles: no outline, only a fill on hover
@@ -612,7 +870,12 @@ class AppsTile(Tile):
         painter.setBrush(fill)
         painter.drawRoundedRect(rect.adjusted(0.5, 0.5, -0.5, -0.5), radius, radius)
         size = rect.width() * self.ICON
-        target = QRectF(rect.center().x() - size / 2, rect.center().y() - size / 2 - rect.height() * 0.03,
+        rise = 0.0
+        if key in self.hops:                           # away from the screen's edge, inside its tile
+            rise = motion.hop((now - self.hops[key]) * 1000 / motion.HOP_MS) * motion.HOP * rect.height()
+            if self.dock.edge == 'top':
+                rise = -rise
+        target = QRectF(rect.center().x() - size / 2, rect.center().y() - size / 2 - rect.height() * 0.03 - rise,
                         size, size)
         pixmap = self.icon_for(group)
         if pixmap is not None:
@@ -621,96 +884,150 @@ class AppsTile(Tile):
             painter.setPen(Qt.NoPen)
             painter.setBrush(look.c(look.track))
             painter.drawRoundedRect(target, size * 0.2, size * 0.2)
-        if group.windows:
-            width = rect.width() * (0.3 if focused else 0.1)
+        started = self.launches.get(key)
+        if group.windows or started is not None:
+            front = self.bars(key, 1.0 if focused else 0.0)
+            width = rect.width() * (0.1 + 0.2 * front)
+            colour = motion.mix(look.c(look.sub), look.c(look.accent), front)
+            if started is not None and motion.on():
+                colour.setAlphaF(colour.alphaF() * motion.breath(now - started['at']))
             painter.setPen(Qt.NoPen)
-            painter.setBrush(look.c(look.accent) if focused else look.c(look.sub))
+            painter.setBrush(colour)
             painter.drawRoundedRect(QRectF(rect.center().x() - width / 2, rect.bottom() - 5, width, 2.5),
                                     1.25, 1.25)
-        if index == self.press_index and self.pressed > 0.01 and self.dragged is None:
+        if not lifted and index >= 0 and index == self.press_index and self.pressed > 0.01 and self.dragged is None:
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(0, 0, 0, round(255 * motion.PRESS_DARK * self.pressed)))
             painter.drawRoundedRect(rect, radius, radius)
+        painter.restore()
 
     def paint(self, painter, rect, look):
         if self.magnified():
             return                                       # the magnifier draws them, over the dock
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
-        tiles = self.rects()
-        lifted = None
-        for index, tile in enumerate(tiles):
-            if self.keys[index] == self.dragged:
-                lifted = index                           # drawn last, over the others
-            else:
-                self.paint_app(painter, index, tile)
-        if lifted is not None:
-            self.paint_app(painter, lifted, tiles[lifted])
+        for entry, tile in self.placed():
+            if entry.key in (self.dragged, self.landing):
+                continue                                 # in the lifted icon's hands
+            self.paint_entry(painter, entry, tile)
 
-    # -- rearranging icons: the one dragged follows the pointer, the others slide aside
+    # -- rearranging icons: the one dragged is lifted off and follows the pointer, the others slide
+    #    aside; a pinned one pulled away from the dock comes off it, and let go there, is unpinned
+    def lifter(self):
+        if self._lift is None and not self.dock.testing:
+            self._lift = motion.Lift(self)
+        return self._lift
+
     def begin_icon_drag(self, pos: QPoint) -> None:
         index = self.press_index
+        self.settle_apps()
         self.dragged = self.keys[index]
+        self.torn = False
+        self.landing = None                              # one still landing is put down where it is
         self.grab_x = pos.x() - self.rest_x(index)
         layer = getattr(self, '_magnifier', None)
         if layer is not None:
             layer.drop()                                 # no magnifying while icons are moved
         self.shown = {key: self.rest_x(i) for i, key in enumerate(self.keys)}
+        centre = QPointF(self.rest_x(index) + self.slot / 2, self.height() / 2)
+        self.held = QPointF(pos) - centre
+        lift = self.lifter()
+        if lift is not None:
+            lift.lift(Shown(self.dragged, self.groups[index], index, 1.0), self.mapToGlobal(centre))
+        self.update()
+
+    def beyond(self, pos: QPoint) -> float:
+        """How far the pointer is past the strip, away from the screen's edge."""
+        return pos.y() - self.height() if self.dock.edge == 'top' else -pos.y()
 
     def drag_icon(self, pos: QPoint) -> None:
         slot = self.slot
+        index = self.keys.index(self.dragged)
+        group = self.groups[index]
+        torn = group.pinned and bool(group.path) and self.beyond(pos) > self.dock.tile_height * motion.TEAR
+        if torn != self.torn:                          # off the dock its room closes; back, it opens again
+            self.torn = torn
+            self.change(self.dragged, self.presence.get(self.dragged, 1.0 if torn else 0.0), 0.0 if torn else 1.0,
+                        motion.CLOSE_MS if torn else motion.OPEN_MS, time.perf_counter())
         self.drag_x = max(0.0, min(self.width() - slot, pos.x() - self.grab_x))
-        centre = self.drag_x + slot / 2
-        others = [key for key in self.keys if key != self.dragged]
-        index = sum(1 for i in range(len(others)) if self.rest_x(i) + slot / 2 < centre)
-        order = others[:index] + [self.dragged] + others[index:]
-        if order != self.keys:
-            by_key = dict(zip(self.keys, self.groups))
-            self.keys = order
-            self.groups = [by_key[key] for key in order]
+        if not torn:
+            centre = self.drag_x + slot / 2
+            others = [key for key in self.keys if key != self.dragged]
+            place = sum(1 for i in range(len(others)) if self.rest_x(i) + slot / 2 < centre)
+            order = others[:place] + [self.dragged] + others[place:]
+            if order != self.keys:
+                by_key = dict(zip(self.keys, self.groups))
+                self.keys = order
+                self.groups = [by_key[key] for key in order]
         self.shown[self.dragged] = self.drag_x
-        self.start_settling()
+        lift = self._lift
+        if lift is not None and lift.isVisible():
+            if group.pinned and group.path:              # free to leave the dock
+                lift.carry(self.mapToGlobal(QPointF(pos)) - self.held, 'Unpin' if torn else '')
+            else:                                        # along the row only
+                lift.carry(self.mapToGlobal(QPointF(self.drag_x + slot / 2, self.height() / 2)))
+        self.settling = True
+        self.kick()
+        self.update()
 
     def end_icon_drag(self) -> None:
+        key = self.dragged
+        index = self.keys.index(key)
+        group = self.groups[index]
+        torn = self.torn
         self.dragged = None
-        rest = [key for key in self.order if key not in self.keys]
+        self.torn = False
+        rest = [k for k in self.order if k not in self.keys]
         self.order = self.keys + rest
         self.dock.cfg['app_order'] = self.order
         self.dock.cfg.save()
-        self.start_settling()
-
-    def start_settling(self) -> None:
-        if not self.settler.isActive():
-            self.last_frame = time.perf_counter()
-            self.settler.start(max(4, theme_frame()))
+        lift = self._lift if self._lift is not None and self._lift.isVisible() else None
+        if torn:
+            self.shown.pop(key, None)
+            if lift is not None:
+                lift.vanish()
+            self.pin(group.path, False)                  # gone, or left as an open app
+        else:
+            target = self.targets().get(key, self.rest_x(index))
+            self.shown[key] = target
+            if lift is not None:
+                self.landing = key
+                lift.land(self.mapToGlobal(QPointF(target + self.slot / 2, self.height() / 2)), self.landed)
+        self.settling = True
+        self.kick()
         self.update()
 
-    def settle(self) -> None:
-        now = time.perf_counter()
-        frames = min(4.0, (now - self.last_frame) * 60)
-        self.last_frame = now
+    def landed(self) -> None:
+        self.landing = None
+        self.update()
+
+    def settle(self, frames: float) -> None:
         rate = 1 - (1 - self.SETTLE) ** frames if motion.on() else 1.0
         moving = False
-        for index, key in enumerate(self.keys):
+        targets = self.targets()
+        for key in list(self.shown):
             if key == self.dragged:
                 continue
-            target = self.rest_x(index)
-            here = self.shown.get(key, target)
+            target = targets.get(key)
+            if target is None:
+                self.shown.pop(key)
+                continue
+            here = self.shown[key]
             here += (target - here) * rate
             if abs(target - here) < 0.3:
                 here = target
             else:
                 moving = True
             self.shown[key] = here
-        if not moving and self.dragged is None:
-            self.settler.stop()
+        if not moving and self.dragged is None and self.landing is None:
+            self.settling = False
             self.shown = {}
-        self.update()
 
     def follow_pointer(self, pos: QPoint | None) -> None:
         layer = self.magnifier()
         if layer is None:
             return
-        if pos is None or self.dragged is not None or self.dock.editing or self.card is not None                 or self.previews_visible():                   # previews open: the icons rest, under them
+        if pos is None or self.dragged is not None or self.landing is not None or self.dock.editing \
+                or self.card is not None or self.previews_visible():   # previews open: the icons rest, under them
             layer.follow(None)
         else:
             layer.follow(pos.x() / (self.slot + self.GAP))
@@ -802,6 +1119,7 @@ class AppsTile(Tile):
         group = self.groups[index]
         if not group.windows:
             _open(group.path)
+            self.launch(self.keys[index])
         elif len(group.windows) == 1:
             window = group.windows[0]
             if self.front_at_press == window.hwnd and not win.is_minimised(window.hwnd):
@@ -847,7 +1165,8 @@ class AppsTile(Tile):
             program = group.windows[0].path
         if group.path:
             name = os.path.splitext(os.path.basename(group.path))[0] or 'App'
-            launch = menu.addAction(name, lambda: _open(group.path))      # the taskbar's top line: start it
+            key = self.keys[index]
+            launch = menu.addAction(name, lambda: (_open(group.path), self.launch(key)))   # the taskbar's top line
             pixmap = self.icon_for(group)
             if pixmap is not None:
                 from PySide6.QtGui import QIcon
@@ -2890,6 +3209,7 @@ class _AITile(Tile):
             for idx, (provider, label, window) in enumerate(rows[:2]):
                 cx = area.x() + idx * cell_w + (4 if idx else 0)
                 pct, share, left = ai.shown_value(window, show_used=show_used)
+                share = self.eased(('ai', provider, label), share)
                 ry = area.center().y() - ring_s / 2.0
                 L.ring(painter, QRectF(cx, ry, ring_s, ring_s), share,
                        ai.health_color(left, look.dark), look.c(look.track), max(2.6, ring_s * 0.11))
@@ -2901,7 +3221,8 @@ class _AITile(Tile):
                 tx = cx + ring_s + 5
                 tw = max(18.0, (area.x() + (idx + 1) * cell_w) - tx - 2)
                 sub = ai.format_reset(window.get('resets_at')) or label
-                self.lines(painter, QRectF(tx, area.y(), tw, area.height()), f'{pct}%', sub)
+                self.lines(painter, QRectF(tx, area.y(), tw, area.height()), f'{pct}%', sub,
+                           roll=('ai', provider, label))
             return
 
         px = {'S': 10, 'M': 11, 'L': 12}.get(self.dock.cfg['size'], 11)
@@ -2919,6 +3240,7 @@ class _AITile(Tile):
         prepared = []
         for provider, label, window in rows[:2]:
             pct, share, left = ai.shown_value(window, show_used=show_used)
+            share = self.eased(('ai', provider, label), share)
             pct_str = f'{pct}%'
             reset_str = ai.format_reset(window.get('resets_at'))
             prepared.append((provider, label, pct_str, reset_str, share, left))
@@ -2943,8 +3265,8 @@ class _AITile(Tile):
                                        provider, look.dark)
                 x += icon_col
             right = area.right()
-            L.text(painter, QRectF(right - pct_w, y, pct_w, row_h), pct_str, look.c(look.text), px, 600,
-                   Qt.AlignRight | Qt.AlignVCenter)
+            self.roll(('ai', provider, label)).paint(painter, QRectF(right - pct_w, y, pct_w, row_h), pct_str,
+                                                     look.c(look.text), px, 600, Qt.AlignRight)
             pct_left = right - pct_w
 
             if style == 'rings':
@@ -2999,6 +3321,7 @@ class _AITile(Tile):
         """Draw a single limit window with a circular ring (default) or horizontal bar."""
         show_used = bool(self.dock.cfg.get('ai_show_used', False))
         pct, share, left = ai.shown_value(window, show_used=show_used)
+        share = self.eased(('ai', label), share)
         reset = ai.format_reset(window.get('resets_at'))
         if self._tile_style() != 'bars':
             ring_s = min(area.height() * 0.68, area.width() * 0.32)
@@ -3007,7 +3330,7 @@ class _AITile(Tile):
                    ai.health_color(left, look.dark), look.c(look.track), max(2.6, ring_s * 0.12))
             self.lines(painter, QRectF(area.x() + ring_s + 6, area.y(),
                                        max(20.0, area.width() - ring_s - 6), area.height()),
-                       f'{pct}%', reset or label)
+                       f'{pct}%', reset or label, roll=('ai', label))
             return
         big, small = self.sizes()
         top_h = small * 1.2

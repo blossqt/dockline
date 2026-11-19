@@ -406,6 +406,258 @@ class DockTests(Temp):
         self.assertEqual(tile.shown, ('ENG', 'US'))
         self.assertFalse(tile.grab().isNull())
 
+    # -- 0.5.10: the dock's motion
+    def moving(self):
+        """Animations on, whatever this PC's setting, for the rest of the test."""
+        from unittest import mock
+        from dockline import motion
+        patch = mock.patch.object(motion, 'on', lambda: True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    @staticmethod
+    def finish(strip, key, share: float) -> None:
+        """Move key's change on to share of its time, then draw a frame."""
+        start, low, high, ms = strip.changes[key]
+        strip.changes[key] = (start - ms / 1000 * share, low, high, ms)
+        strip.frame()
+
+    def test_apps_grow_in_and_shrink_away_keeping_their_size(self):
+        """A new app used to make every icon shrink for a moment (the strip had its room before the
+        dock had widened), and one closing made those after it jump a whole place."""
+        self.moving()
+        shown = [win.Window(101, 'One', 7, r'C:\a\one.exe'), win.Window(102, 'Two', 8, r'C:\b\two.exe')]
+        win.app_windows = lambda pid: list(shown)
+        dock = self.make()
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        dock.fit_now()
+        tile = float(dock.tile_height)
+        shown.append(win.Window(103, 'Three', 9, r'C:\c\three.exe'))
+        strip.refresh()
+        new = r'c:\c\three.exe'
+        self.assertEqual(strip.presence[new], 0.0)                 # coming: no room yet
+        self.finish(strip, new, 0.4)
+        self.assertTrue(0.0 < strip.presence[new] < 1.0)
+        self.assertEqual(strip.slot, tile)                         # the others keep their size
+        self.assertAlmostEqual(strip.width(), strip.wanted(strip.weight()), delta=2)
+        self.finish(strip, new, 1.0)
+        self.assertEqual(strip.presence, {})
+        self.assertEqual(len(strip.rects()), 3)
+        shown.pop(0)                                               # the first app closes
+        strip.refresh()
+        gone = r'c:\a\one.exe'
+        self.assertIn(gone, strip.leaving)
+        self.assertEqual([e.key for e in strip.display()][0], gone)     # shrinking where it was
+        self.assertEqual(strip.display()[0].index, -1)
+        self.assertEqual(len(strip.rects()), 2)                    # not an app to point at any more
+        self.finish(strip, gone, 0.5)
+        self.assertEqual(strip.slot, tile)
+        self.finish(strip, gone, 1.0)
+        self.assertEqual(strip.leaving, {})
+        self.assertEqual([e.key for e in strip.display()], [r'c:\b\two.exe', new])
+        strip.retire()
+        dock.hide()
+
+    def test_apps_jump_straight_to_their_places_without_animations(self):
+        from unittest import mock
+        from dockline import motion
+        shown = [win.Window(101, 'One', 7, r'C:\a\one.exe')]
+        win.app_windows = lambda pid: list(shown)
+        dock = self.make()
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        with mock.patch.object(motion, 'on', lambda: False):
+            shown.append(win.Window(102, 'Two', 8, r'C:\b\two.exe'))
+            strip.refresh()
+        self.assertEqual((strip.presence, strip.changes, strip.leaving), ({}, {}, {}))
+        self.assertEqual(len(strip.display()), 2)
+        dock.hide()
+
+    def test_started_app_hops_and_breathes_until_its_window_shows(self):
+        from dockline import motion, widgets
+        self.moving()
+        source = some_shortcut()
+        program = shortcuts.read(str(source)).target
+        shown = []
+        win.app_windows = lambda pid: list(shown)
+        dock = self.make()
+        dock.cfg['pinned'] = [str(source)]
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        started = []
+        real_open = widgets._open
+        widgets._open = started.append
+        try:
+            strip.click(strip.rects()[0].center().toPoint())
+        finally:
+            widgets._open = real_open
+        key = strip.keys[0]
+        self.assertEqual(started, [str(source)])
+        self.assertIn(key, strip.launches)
+        self.assertIn(key, strip.hops)
+        self.assertTrue(strip.animator.isActive())
+        self.assertGreater(strip.grab().width(), 0)                # drawn mid-hop
+        shown.append(win.Window(201, 'Its window', 5, program))
+        strip.refresh()
+        self.assertNotIn(key, strip.launches)                      # its window showed
+        # started through a launcher: another program's new window comes to the front
+        strip.launch(key)
+        shown.append(win.Window(202, 'Launched', 6, r'C:\other\real.exe'))
+        real_front = win.foreground
+        win.foreground = lambda: 202
+        try:
+            strip.refresh()
+        finally:
+            win.foreground = real_front
+        self.assertNotIn(key, strip.launches)
+        # nothing shows: it stops after LAUNCH_MOST seconds
+        strip.launch(key)
+        strip.launches[key]['at'] -= motion.LAUNCH_MOST + 1
+        strip.end_launches()
+        self.assertEqual(strip.launches, {})
+        strip.retire()
+        dock.hide()
+
+    def test_attention_pulses_then_holds(self):
+        from dockline import motion
+        self.moving()
+        self.assertEqual(motion.pulse(0.0), 0.0)
+        self.assertAlmostEqual(motion.pulse(motion.PULSE / 2), 1.0)
+        self.assertEqual(motion.pulse(motion.PULSE * motion.PULSES + 5), 1.0)       # then held
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        real_front = win.foreground
+        win.foreground = lambda: 999
+        try:
+            strip.flash(101)
+        finally:
+            win.foreground = real_front
+        self.assertIn(101, strip.flash_at)
+        self.assertEqual(strip.animator.interval(), motion.PULSE_EVERY)              # pulses alone: slow frames
+        strip.flash(101, False)
+        self.assertNotIn(101, strip.flash_at)
+        strip.retire()
+        dock.hide()
+
+    def test_pinned_icon_dragged_off_the_dock_is_unpinned(self):
+        from PySide6.QtCore import QPoint
+        self.moving()
+        source = some_shortcut()
+        shown = [win.Window(101, 'One', 7, r'C:\a\one.exe')]
+        win.app_windows = lambda pid: list(shown)
+        dock = self.make()
+        dock.cfg['pinned'] = [str(source)]
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        strip.settle_apps()                                        # the pin, in its place at once
+        index = next(i for i, group in enumerate(strip.groups) if group.pinned)
+        pinned_key = strip.keys[index]
+        here = strip.rects()[index].center().toPoint()
+        strip.press_index = index
+        strip.begin_icon_drag(here)
+        strip.drag_icon(QPoint(here.x(), -dock.tile_height * 3))  # well past the dock
+        self.assertTrue(strip.torn)
+        self.assertEqual(strip.changes[pinned_key][2], 0.0)       # its room closes
+        strip.drag_icon(QPoint(here.x(), here.y()))                # back over the dock: it opens again
+        self.assertFalse(strip.torn)
+        self.assertEqual(strip.changes[pinned_key][2], 1.0)
+        strip.drag_icon(QPoint(here.x(), -dock.tile_height * 3))
+        strip.end_icon_drag()
+        self.assertEqual(dock.cfg['pinned'], [])
+        self.assertNotIn(pinned_key, strip.keys)
+        # an open app that is not pinned stays in the row, however far it is pulled
+        strip.settle_apps()
+        index = strip.keys.index(r'c:\a\one.exe')
+        strip.press_index = index
+        here = strip.rects()[index].center().toPoint()
+        strip.begin_icon_drag(here)
+        strip.drag_icon(QPoint(here.x(), -dock.tile_height * 3))
+        self.assertFalse(strip.torn)
+        strip.end_icon_drag()
+        self.assertIn(r'c:\a\one.exe', strip.keys)
+        strip.retire()
+        dock.hide()
+
+    def test_gauges_glide_and_figures_roll(self):
+        import time
+        from dockline import motion
+        self.moving()
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        self.assertEqual(tile.eased('x', 0.2), 0.2)                  # the first reading as it is
+        self.assertEqual(tile.eased('x', 0.8), 0.2)                  # then a glide from there
+        deadline = time.perf_counter() + 2
+        while time.perf_counter() < deadline and abs(tile.eased('x', 0.8) - 0.8) > 1e-6:
+            APP.processEvents()
+        self.assertAlmostEqual(tile.eased('x', 0.8), 0.8)
+        roll = tile.roll('figures')
+        roll.set('37%')
+        roll.set('42%')
+        self.assertTrue(roll.up)
+        self.assertEqual(roll.t, 0.0)
+        countdown = tile.roll('timer')
+        countdown.set('04:59')
+        countdown.set('04:58')
+        self.assertFalse(countdown.up)                               # a countdown rolls down
+        self.assertEqual(motion._number('1:02:03'), 10203)
+        dock.hide()
+
+    def test_previews_glide_from_app_to_app(self):
+        import time
+        from unittest import mock
+        from dockline import motion, previews
+        self.moving()
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe'),
+                                       win.Window(102, 'Two', 8, r'C:\b\two.exe'),
+                                       win.Window(103, 'Three', 8, r'C:\b\two.exe')]
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        tile.refresh()
+        dock.layout().activate()
+        panel = previews.Previews(tile)
+        dock.testing = False                                       # animate, as on screen
+        try:
+            with mock.patch.object(previews.Previews, 'clear_shell', lambda self: None), \
+                    mock.patch.object(previews.Previews, 'take_band', lambda self, band: None):
+                panel.show_for(0)
+                first = panel.geometry()
+                panel.show_for(1)                                    # along to the next app
+                self.assertIsNotNone(panel._glide)
+                self.assertEqual(panel.geometry().x(), first.x())  # from where it was
+                self.assertLess(panel.reveal, 1.0)
+                deadline = time.perf_counter() + 2
+                while panel._glide is not None and time.perf_counter() < deadline:
+                    APP.processEvents()
+                self.assertEqual(panel.reveal, 1.0)
+                self.assertGreater(panel.width(), first.width())   # two windows' previews
+                panel.close_now()
+                self.assertIsNone(panel.band)
+        finally:
+            dock.testing = True
+        dock.hide()
+
+    def test_frosted_band_leaves_out_the_magnified_icons(self):
+        from PySide6.QtCore import QRect
+        from dockline import look as L
+        band = QRect(0, 100, 400, 120)
+        whole = L.frosted_band(band)
+        if whole is None:
+            self.skipTest('no screen to take here')
+        part = L.frosted_band(band, QRect(150, 180, 100, 90))        # the icons cover its foot
+        self.assertIsNotNone(part)
+        self.assertEqual(part.size(), whole.size())                 # carried over the rows left out
+        self.assertIsNone(L.frosted_band(band, QRect(0, 90, 400, 200)))   # nothing left to take
+
 
 class DisplayTests(unittest.TestCase):
     """The main dock follows Windows' main display (stand-in displays and docks)."""
