@@ -20,10 +20,13 @@ from . import uia, win
 from .taskbar import Taskbar
 from .ai import AIUsage
 from .weather import Weather
+from .notices import Notices
 from .config import NEW_WIDGETS, ONLY_WITH_TWO_KEYBOARDS
 from .widgets import REGISTRY
 
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
+ALERT_HOLD = 1.2      # s an alert keeps a hidden dock out, once it is in
+ALERT_SLIDE = 0.22    # s the dock takes to come in
 WM_QUERYENDSESSION, WM_DISPLAYCHANGE = 0x11, 0x7E
 
 
@@ -115,6 +118,8 @@ class Dock(QWidget):
         self.weather = Weather()
         self.ai = AIUsage(cfg, testing=testing)
         self.ai.low_allowance.connect(self._on_low_allowance)
+        self.notices = Notices(self)              # Windows notifications arriving (main dock only)
+        self.notices.arrived.connect(self.notice_arrived)
         self.tiles = []
         self.picker = None
         self.settings_window = None
@@ -285,6 +290,7 @@ class Dock(QWidget):
         if self.main:
             self.keeper.start()
             self.start_guard()
+            self.notices.start()
         win.user32.RegisterShellHookWindow(hwnd)     # the taskbar's notices: windows coming, going, flashing
         self.target_screen.geometryChanged.connect(self.screen_changed)
         self._screen_connected = True
@@ -295,6 +301,7 @@ class Dock(QWidget):
     def stop(self) -> None:
         """Give the screen and the taskbar back."""
         self.ai.stop()
+        self.notices.stop()
         self.ticker.stop()
         self.keeper.stop()
         self.peek.stop()
@@ -535,7 +542,8 @@ class Dock(QWidget):
         if apps is None:
             return
         if code == win.HSHELL_FLASH:
-            apps.flash(hwnd, True)
+            if apps.flash(hwnd, True) and (self.testing or self.shows_window(hwnd)):
+                self.alert()
         elif code in (win.HSHELL_WINDOWACTIVATED, win.HSHELL_RUDEAPPACTIVATED):
             apps.flash(hwnd, False)
             apps.window_changed()
@@ -548,11 +556,30 @@ class Dock(QWidget):
 
     def _on_low_allowance(self, _provider: str, _label: str, _left: float) -> None:
         """An active AI allowance dropped to 15% left or less: bring a tucked dock out briefly."""
-        if self.main and self.tucked and not self.full_screen and not self.testing:
+        if self.main and not self.testing:
+            self.alert(4.0)
+
+    def alert(self, hold: float = ALERT_HOLD) -> None:
+        """Something wants to be seen - an app requesting attention, a timer ending, a notification:
+        a hidden dock comes out for a moment and goes again, unless the pointer reaches it. Never over
+        a full-screen app or game."""
+        if not self.cfg.get('alerts', True) or not self.autohide() or self.full_screen \
+                or not self.screen_alive():
+            return
+        until = time.monotonic() + ALERT_SLIDE + hold
+        if self.tucked:
+            if not self.testing and win.full_screen_in_front(os.getpid(), self.device or None):
+                return
             self.place()
             self.tucked = False
-            self.away_since = time.monotonic() + 4.0
+            self.away_since = until
             self.slide(True)
+        elif self.away_since is not None:            # out, and about to go: it stays for this too
+            self.away_since = max(self.away_since, until)
+
+    def notice_arrived(self) -> None:
+        """A Windows notification arrived."""
+        self.alert()
 
     def come_back(self) -> None:
         """Dockline was started again: whatever happened, the dock shows."""

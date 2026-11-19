@@ -164,6 +164,9 @@ class SettingsWindow(QWidget):
         self.check(system, 'Hide the dock automatically', 'autohide', 'autohide',
                    'The dock appears when the pointer reaches the edge of the screen, except over '
                    'full-screen apps.')
+        self.check(system, 'Show the dock for alerts', 'alerts', 'alerts',
+                   'A hidden dock appears briefly when an app requests attention, a timer ends or a '
+                   'notification arrives.')
         self.check(system, 'Start with Windows', 'startup', 'startup')
         pins_row = QHBoxLayout()
         import_pins = QPushButton('Import taskbar pins')

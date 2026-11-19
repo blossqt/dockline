@@ -546,6 +546,61 @@ class DockTests(Temp):
         strip.retire()
         dock.hide()
 
+    def test_alerts_bring_a_hidden_dock_out_briefly(self):
+        """An app requesting attention, a timer ending or a notification: a tucked dock comes out for a
+        moment, once per request; never with alerts off, without auto-hide or over a full-screen app."""
+        import time as clock
+        from unittest import mock
+        from dockline import dock as dock_module
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        slides = []
+
+        def tuck():
+            dock.tucked, dock.away_since = True, None
+
+        with mock.patch.object(dock, 'autohide', lambda: True), \
+                mock.patch.object(dock, 'place', lambda: None), \
+                mock.patch.object(dock, 'slide', lambda coming, then=None: slides.append(coming)), \
+                mock.patch.object(win, 'foreground', lambda: 999):
+            tuck()
+            dock.shell_notice(win.HSHELL_FLASH, 101)
+            self.assertFalse(dock.tucked)
+            self.assertEqual(slides, [True])
+            left = dock.away_since - clock.monotonic()
+            self.assertAlmostEqual(left, dock_module.ALERT_SLIDE + dock_module.ALERT_HOLD, delta=0.1)
+            tuck()
+            dock.shell_notice(win.HSHELL_FLASH, 101)               # the same request flashing on: no more
+            self.assertTrue(dock.tucked)
+            dock.away_since = clock.monotonic() + 0.1              # out and about to go: held for a new one
+            dock.tucked = False
+            dock.notice_arrived()
+            self.assertGreater(dock.away_since - clock.monotonic(), 1.0)
+            self.assertEqual(len(slides), 1)
+            tuck()
+            from dockline.widgets import REGISTRY
+            timer = REGISTRY['timer'](dock)
+            timer.ends = clock.monotonic() - 1
+            with mock.patch('ctypes.windll.user32.MessageBeep', lambda kind: None):
+                timer.tick()
+            self.assertFalse(dock.tucked)                          # the timer's end brought it out
+            tuck()
+            dock.full_screen = True
+            dock.notice_arrived()
+            self.assertTrue(dock.tucked)
+            dock.full_screen = False
+            dock.cfg['alerts'] = False
+            dock.notice_arrived()
+            self.assertTrue(dock.tucked)
+            dock.cfg['alerts'] = True
+        dock.notice_arrived()                                      # auto-hide off (a test dock): nothing
+        self.assertTrue(dock.tucked)
+        strip.retire()
+        dock.hide()
+
     def test_pinned_icon_dragged_off_the_dock_is_unpinned(self):
         from PySide6.QtCore import QPoint
         self.moving()
@@ -825,6 +880,52 @@ class WindowsTests(unittest.TestCase):
             self.assertFalse(win.full_screen_in_front(os.getpid() + 1))
         finally:
             win.user32.IsZoomed = real_zoomed
+
+
+class NoticesTests(Temp):
+    def store(self):
+        import sqlite3
+        path = str(self.folder / 'wpndatabase.db')
+        db = sqlite3.connect(path)
+        db.execute('PRAGMA journal_mode=WAL')
+        db.execute('CREATE TABLE Notification (Id INTEGER PRIMARY KEY, Type TEXT)')
+        db.executemany('INSERT INTO Notification VALUES (?, ?)', [(5, 'toast'), (6, 'tile'), (7, 'badge')])
+        db.commit()
+        return path, db
+
+    def test_new_toasts_are_noticed_once(self):
+        """What is there at start is no news; a new toast is, once; tiles, badges and removals are not."""
+        from dockline.notices import Notices
+        path, db = self.store()
+        notices = Notices(path=path)
+        heard = []
+        notices.arrived.connect(lambda: heard.append(1))
+        notices.start()
+        self.assertEqual((notices.newest, heard), (5, []))
+        notices.look()
+        self.assertEqual(heard, [])                                # nothing changed: not even read
+        db.execute("INSERT INTO Notification VALUES (8, 'tile')")
+        db.commit()
+        notices.look()
+        self.assertEqual(heard, [])
+        db.execute("INSERT INTO Notification VALUES (9, 'toast')")
+        db.commit()
+        notices.look()
+        self.assertEqual(heard, [1])
+        db.execute('DELETE FROM Notification WHERE Id = 9')        # dismissed: no news
+        db.commit()
+        notices.look()
+        self.assertEqual((heard, notices.newest), ([1], 9))
+        notices.stop()
+        db.close()
+
+    def test_no_store_is_quiet(self):
+        from dockline.notices import Notices
+        notices = Notices(path=str(self.folder / 'missing.db'))
+        notices.start()
+        notices.look()
+        self.assertIsNone(notices.newest)
+        notices.stop()
 
 
 class AIUsageTests(Temp):

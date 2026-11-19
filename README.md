@@ -25,7 +25,8 @@ What it does in the taskbar's place:
   and shortcuts dragged onto the dock are pinned. A hidden dock comes up for a file drag.
 - The input language of the window in front, with the input mode of Chinese, Japanese and Korean
   input methods (shown where Windows has more than one keyboard language).
-- Hides only for games and full-screen video; a maximised window keeps it reachable.
+- Hides only for games and full-screen video; a maximised window keeps it reachable. A hidden dock
+  appears briefly when an app requests attention, a timer ends or a Windows notification arrives.
 
 - Runs on Windows 10 and 11 (64-bit).
 - Build: `powershell -ExecutionPolicy Bypass -File build\bootstrap.ps1`, then

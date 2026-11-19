@@ -550,16 +550,20 @@ class AppsTile(Tile):
         if self.dragged is None:
             self.soon.start()
 
-    def flash(self, hwnd: int, on: bool = True) -> None:
+    def flash(self, hwnd: int, on: bool = True) -> bool:
+        """A window requests attention (on), or has it again; True when it has just started to."""
+        started = False
         if on and hwnd != win.foreground():
             if hwnd not in self.flashing:
                 self.flash_at[hwnd] = time.perf_counter()
+                started = True
             self.flashing.add(hwnd)
             self.kick()
         else:
             self.flashing.discard(hwnd)
             self.flash_at.pop(hwnd, None)
         self.update()
+        return started
 
     def new_window(self, index: int) -> None:
         """Middle-click or Shift+click: another window of the app, as on the taskbar."""
@@ -2502,6 +2506,7 @@ class TimerTile(Tile):
             self.left = float(self.length)
             self.finished_at = time.monotonic()
             ctypes.windll.user32.MessageBeep(0x40)
+            self.dock.alert()
         if self.finished_at and time.monotonic() - self.finished_at > 10:
             self.finished_at = None
         if self.big is not None:
@@ -2708,6 +2713,7 @@ class PomodoroTile(Tile):
         self.ends = time.monotonic() + self.left if running else None
         if sound:
             ctypes.windll.user32.MessageBeep(0x40)
+            self.dock.alert()
 
     def tick(self):
         if self.ends and self.remaining() <= 0:
