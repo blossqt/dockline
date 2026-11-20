@@ -397,6 +397,15 @@ VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_PLAY_PAUSE = 0xB0, 0xB1, 0xB3
 _EXTENDED = {VK_LWIN, VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_PLAY_PAUSE}
 
 
+VK_CONTROL = 0x11
+
+
+def task_manager() -> None:
+    """Open Task Manager as the taskbar's menu does: Ctrl+Shift+Esc, which Windows answers itself, so
+    no elevation prompt and no second copy if it is open already."""
+    press(VK_CONTROL, VK_SHIFT, VK_ESCAPE)
+
+
 def press(*keys: int) -> None:
     """Press keys together, then let them go in reverse order."""
     for key in keys:

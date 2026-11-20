@@ -546,6 +546,25 @@ class DockTests(Temp):
         strip.retire()
         dock.hide()
 
+    def test_menu_opens_task_manager(self):
+        """The dock's right-click menu has Task Manager, as the Windows taskbar's has."""
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        from dockline import dock as dock_module
+        dock = self.make()
+        shown, opened = [], []
+
+        def exec_(menu, *_):
+            shown.append([a.text() for a in menu.actions() if a.text()])
+            next(a for a in menu.actions() if a.text() == 'Task Manager').trigger()
+
+        with mock.patch.object(dock_module.GlassMenu, 'exec', exec_), \
+                mock.patch.object(win, 'task_manager', lambda: opened.append(1)):
+            dock.context_menu(None, QPoint(0, 0), QPoint(0, 0))
+        self.assertEqual(shown[0][:2], ['Task Manager', 'Settings…'])
+        self.assertEqual(opened, [1])
+        dock.hide()
+
     def test_alerts_bring_a_hidden_dock_out_briefly(self):
         """An app requesting attention, a timer ending or a notification: a tucked dock comes out for a
         moment, once per request; never with alerts off, without auto-hide or over a full-screen app."""

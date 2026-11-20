@@ -969,6 +969,7 @@ class Dock(QWidget):
                 menu.addAction('Reset width', tile.reset_width)
             menu.addAction(f'Remove {tile.NAME}', lambda: self.remove_widget(tile.ID))
             menu.addSeparator()
+        menu.addAction('Task Manager', win.task_manager)
         menu.addAction('Settings…', self.open_settings)
         menu.addSeparator()
         if self.edge == 'top':
