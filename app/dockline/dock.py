@@ -27,6 +27,7 @@ from .widgets import REGISTRY
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ALERT_HOLD = 1.2      # s an alert keeps a hidden dock out, once it is in
 ALERT_SLIDE = 0.22    # s the dock takes to come in
+NOTICE_GAP = 60.0     # s: at most one notification brings the dock out in this time
 WM_QUERYENDSESSION, WM_DISPLAYCHANGE = 0x11, 0x7E
 
 
@@ -559,11 +560,11 @@ class Dock(QWidget):
         if self.main and not self.testing:
             self.alert(4.0)
 
-    def alert(self, hold: float = ALERT_HOLD) -> None:
+    def alert(self, hold: float = ALERT_HOLD, setting: str = 'alerts') -> None:
         """Something wants to be seen - an app requesting attention, a timer ending, a notification:
         a hidden dock comes out for a moment and goes again, unless the pointer reaches it. Never over
         a full-screen app or game."""
-        if not self.cfg.get('alerts', True) or not self.autohide() or self.full_screen \
+        if not self.cfg.get(setting, True) or not self.autohide() or self.full_screen \
                 or not self.screen_alive():
             return
         until = time.monotonic() + ALERT_SLIDE + hold
@@ -577,9 +578,14 @@ class Dock(QWidget):
         elif self.away_since is not None:            # out, and about to go: it stays for this too
             self.away_since = max(self.away_since, until)
 
-    def notice_arrived(self) -> None:
-        """A Windows notification arrived."""
-        self.alert()
+    def notice_arrived(self, _app: str = '') -> None:
+        """A Windows notification arrived: shown for, unless that is turned off, or one came within
+        NOTICE_GAP (a burst of messages brings the dock out once)."""
+        now = time.monotonic()
+        if now - getattr(self, '_notice_at', -1e9) < NOTICE_GAP:
+            return
+        self._notice_at = now
+        self.alert(setting='alert_notices')
 
     def come_back(self) -> None:
         """Dockline was started again: whatever happened, the dock shows."""

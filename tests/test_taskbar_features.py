@@ -903,40 +903,81 @@ class WindowsTests(unittest.TestCase):
 
 class NoticesTests(Temp):
     def store(self):
+        """A stand-in for Windows' notification store, with its tables' real column names."""
         import sqlite3
         path = str(self.folder / 'wpndatabase.db')
         db = sqlite3.connect(path)
         db.execute('PRAGMA journal_mode=WAL')
-        db.execute('CREATE TABLE Notification (Id INTEGER PRIMARY KEY, Type TEXT)')
-        db.executemany('INSERT INTO Notification VALUES (?, ?)', [(5, 'toast'), (6, 'tile'), (7, 'badge')])
+        db.execute('CREATE TABLE Notification (Id INTEGER PRIMARY KEY, HandlerId INTEGER, Type TEXT, '
+                   'Tag TEXT, "Group" TEXT)')
+        db.execute('CREATE TABLE NotificationHandler (RecordId INTEGER PRIMARY KEY, PrimaryId TEXT)')
+        db.execute('CREATE TABLE HandlerSettings (HandlerId INTEGER, SettingKey TEXT, Value INTEGER)')
+        db.executemany('INSERT INTO NotificationHandler VALUES (?, ?)', [
+            (1, 'Claude_pzs8sxrjxfjjc!Claude'), (2, 'Microsoft.ScreenSketch_8wekyb3d8bbwe!App'),
+            (3, 'com.quiet.app'), (4, 'Microsoft.YourPhone!App')])
+        db.executemany('INSERT INTO HandlerSettings VALUES (?, ?, ?)', [
+            (1, 's:banner', 1), (3, 's:banner', 0)])
+        db.executemany('INSERT INTO Notification VALUES (?, ?, ?, ?, ?)', [
+            (5, 1, 'toast', 'idle-a', 'session-a'), (6, 1, 'tile', '', ''), (7, 1, 'badge', '', '')])
         db.commit()
         return path, db
 
+    def add(self, db, *row):
+        db.execute('INSERT INTO Notification VALUES (?, ?, ?, ?, ?)', row)
+        db.commit()
+
     def test_new_toasts_are_noticed_once(self):
-        """What is there at start is no news; a new toast is, once; tiles, badges and removals are not."""
+        """What is there at start is no news; a new toast is, once; tiles, badges and removals are not;
+        nor a toast replacing one already seen (Claude's per-session status at each turn's end), a
+        screenshot confirmation, or an app whose banners are off in Windows Settings."""
         from dockline.notices import Notices
         path, db = self.store()
         notices = Notices(path=path)
         heard = []
-        notices.arrived.connect(lambda: heard.append(1))
+        notices.arrived.connect(heard.append)
         notices.start()
         self.assertEqual((notices.newest, heard), (5, []))
         notices.look()
         self.assertEqual(heard, [])                                # nothing changed: not even read
-        db.execute("INSERT INTO Notification VALUES (8, 'tile')")
-        db.commit()
+        self.add(db, 8, 1, 'tile', '', '')
         notices.look()
         self.assertEqual(heard, [])
-        db.execute("INSERT INTO Notification VALUES (9, 'toast')")
+        db.execute('DELETE FROM Notification WHERE Id = 5')
+        self.add(db, 9, 1, 'toast', 'idle-a', 'session-a')         # the same status, replaced
+        notices.look()
+        self.assertEqual(heard, [])
+        self.add(db, 10, 2, 'toast', '', '')                       # "Screenshot copied to clipboard"
+        self.add(db, 11, 3, 'toast', 't', '')                      # banners off for this app
+        notices.look()
+        self.assertEqual(heard, [])
+        self.add(db, 12, 4, 'toast', 'm1', '')                     # a message on the phone
+        self.add(db, 13, 1, 'toast', 'idle-b', 'session-b')        # another session's first
+        notices.look()
+        self.assertEqual(heard, ['Microsoft.YourPhone!App'])       # once a look, however many
+        db.execute('DELETE FROM Notification WHERE Id = 13')       # dismissed: no news
         db.commit()
         notices.look()
-        self.assertEqual(heard, [1])
-        db.execute('DELETE FROM Notification WHERE Id = 9')        # dismissed: no news
-        db.commit()
-        notices.look()
-        self.assertEqual((heard, notices.newest), ([1], 9))
+        self.assertEqual((len(heard), notices.newest), (1, 13))
         notices.stop()
         db.close()
+
+    def test_notifications_bring_the_dock_out_at_most_once_a_minute(self):
+        from unittest import mock
+        from dockline import dock as dock_module
+        from dockline.dock import Dock
+        cfg = Config(None)
+        cfg['widgets'] = ['start', 'apps', 'clock']
+        dock = Dock(cfg, testing=True)
+        shown = []
+        clock = [1000.0]
+        with mock.patch.object(dock, 'alert', lambda **kw: shown.append(kw)), \
+                mock.patch.object(dock_module.time, 'monotonic', lambda: clock[0]):
+            dock.notice_arrived('a')
+            dock.notice_arrived('b')
+            clock[0] += dock_module.NOTICE_GAP + 1
+            dock.notice_arrived('c')
+        self.assertEqual(shown, [{'setting': 'alert_notices'}] * 2)
+        dock.hide()
 
     def test_no_store_is_quiet(self):
         from dockline.notices import Notices

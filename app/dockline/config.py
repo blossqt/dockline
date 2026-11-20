@@ -21,6 +21,7 @@ DEFAULTS = {
     'hide_taskbar': False,
     'autohide': True,           # tucked away until the pointer reaches the screen's edge
     'alerts': True,             # a hidden dock comes out briefly for attention, timers and notifications
+    'alert_notices': True,      # ...and Windows notifications among them
     'startup': False,
     'widgets': DEFAULT_WIDGETS,
     'pinned': [],

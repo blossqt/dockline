@@ -11,6 +11,8 @@ from __future__ import annotations
 import ctypes
 import os
 import sqlite3
+import time
+import winreg
 from ctypes import wintypes
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -18,6 +20,15 @@ from PySide6.QtCore import QObject, QTimer, Signal
 EVERY = 1000          # ms between looks at the store's files
 
 NEWEST = "SELECT MAX(Id) FROM Notification WHERE Type = 'toast'"
+# toasts after an id, with their app and whether its banners (or all its toasts) are off in Settings
+NEW_TOASTS = """
+    SELECT h.PrimaryId, n.Tag, n."Group",
+           EXISTS (SELECT 1 FROM HandlerSettings s WHERE s.HandlerId = n.HandlerId
+                   AND s.SettingKey IN ('s:banner', 's:toast') AND s.Value = 0)
+    FROM Notification n JOIN NotificationHandler h ON h.RecordId = n.HandlerId
+    WHERE n.Type = 'toast' AND n.Id > ? ORDER BY n.Id"""
+# confirmations of the user's own action, never news: Snipping Tool's "Screenshot copied to clipboard"
+QUIET = {'Microsoft.ScreenSketch_8wekyb3d8bbwe!App'}
 
 
 _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -58,15 +69,29 @@ def store_path() -> str:
                         'wpndatabase.db')
 
 
+def toasts_on() -> bool:
+    """Windows' own switch for all notifications (Settings > System > Notifications)."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r'Software\Microsoft\Windows\CurrentVersion\PushNotifications') as key:
+            return int(winreg.QueryValueEx(key, 'ToastEnabled')[0]) != 0
+    except (OSError, ValueError, TypeError):
+        return True
+
+
 class Notices(QObject):
-    """Emits arrived for each look that finds a toast newer than any seen before."""
-    arrived = Signal()
+    """Emits arrived(app) for each look that finds a new notification worth a look: shown as a banner
+    (the app's banners are on in Windows Settings), not an update of one already seen (the same app,
+    tag and group: Claude's per-session status is replaced at every turn's end), and not a confirmation
+    of the user's own action (QUIET)."""
+    arrived = Signal(str)
 
     def __init__(self, parent=None, path: str | None = None, every: int = EVERY):
         super().__init__(parent)
         self.path = path or store_path()
         self.stamp = None            # the store's files as last looked at
         self.newest: int | None = None
+        self.seen: dict[tuple, float] = {}     # (app, tag, group) of notifications seen, and when
         self.timer = QTimer(self)
         self.timer.setInterval(every)
         self.timer.timeout.connect(self.look)
@@ -81,7 +106,9 @@ class Notices(QObject):
     def _stamp(self):
         return tuple(_written(self.path + suffix) for suffix in ('', '-wal'))
 
-    def _read(self) -> int | None:
+    def _read(self, after: int | None):
+        """The newest toast's id, and the toasts after `after` (all of them on a first look) as
+        (app, tag, group, banner shown); None while the store cannot be read."""
         if not os.path.exists(self.path):
             return None
         try:
@@ -90,7 +117,10 @@ class Notices(QObject):
             return None
         try:
             row = db.execute(NEWEST).fetchone()
-            return int(row[0]) if row and row[0] is not None else 0
+            newest = int(row[0]) if row and row[0] is not None else 0
+            rows = db.execute(NEW_TOASTS, (after if after is not None else -1,)).fetchall()
+            return newest, [(str(app or ''), str(tag or ''), str(group or ''), not off)
+                            for app, tag, group, off in rows]
         except (sqlite3.Error, TypeError, ValueError):
             return None
         finally:
@@ -100,10 +130,23 @@ class Notices(QObject):
         stamp = self._stamp()
         if stamp == self.stamp:
             return
-        newest = self._read()
-        if newest is None:
+        read = self._read(self.newest)
+        if read is None:
             return                   # unreadable now (busy): looked at again next time
+        newest, toasts = read
         self.stamp = stamp
-        if self.newest is not None and newest > self.newest:
-            self.arrived.emit()
+        first = self.newest is None
+        now = time.monotonic()
+        news = ''
+        for app, tag, group, banner in toasts:
+            key = (app, tag, group)
+            again = bool(tag or group) and key in self.seen
+            self.seen[key] = now
+            if not first and banner and not again and app not in QUIET and not news:
+                news = app
+        if news and toasts_on():
+            self.arrived.emit(news)
+        if len(self.seen) > 500:
+            for key in sorted(self.seen, key=self.seen.get)[:250]:
+                del self.seen[key]
         self.newest = newest if self.newest is None else max(self.newest, newest)
