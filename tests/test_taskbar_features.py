@@ -914,7 +914,9 @@ class NoticesTests(Temp):
         db.execute('CREATE TABLE HandlerSettings (HandlerId INTEGER, SettingKey TEXT, Value INTEGER)')
         db.executemany('INSERT INTO NotificationHandler VALUES (?, ?)', [
             (1, 'Claude_pzs8sxrjxfjjc!Claude'), (2, 'Microsoft.ScreenSketch_8wekyb3d8bbwe!App'),
-            (3, 'com.quiet.app'), (4, 'Microsoft.YourPhone!App')])
+            (3, 'com.quiet.app'), (4, 'com.discord'),
+            (5, 'Microsoft.YourPhone_8wekyb3d8bbwe!YourPhoneNotifications_com.instagram.android'),
+            (6, 'MicrosoftWindows.CrossDevice_cw5n1h2txyewy!NewPhotoToast_1')])
         db.executemany('INSERT INTO HandlerSettings VALUES (?, ?, ?)', [
             (1, 's:banner', 1), (3, 's:banner', 0)])
         db.executemany('INSERT INTO Notification VALUES (?, ?, ?, ?, ?)', [
@@ -950,14 +952,18 @@ class NoticesTests(Temp):
         self.add(db, 11, 3, 'toast', 't', '')                      # banners off for this app
         notices.look()
         self.assertEqual(heard, [])
-        self.add(db, 12, 4, 'toast', 'm1', '')                     # a message on the phone
-        self.add(db, 13, 1, 'toast', 'idle-b', 'session-b')        # another session's first
+        self.add(db, 14, 5, 'toast', 'p1', '')                     # the phone's, through Phone Link
+        self.add(db, 15, 6, 'toast', 'p2', '')                     # a new photo on the phone
         notices.look()
-        self.assertEqual(heard, ['Microsoft.YourPhone!App'])       # once a look, however many
-        db.execute('DELETE FROM Notification WHERE Id = 13')       # dismissed: no news
+        self.assertEqual(heard, [])
+        self.add(db, 16, 4, 'toast', 'm1', '')                     # a message in an app on this PC
+        self.add(db, 17, 1, 'toast', 'idle-b', 'session-b')        # another session's first
+        notices.look()
+        self.assertEqual(heard, ['com.discord'])                   # once a look, however many
+        db.execute('DELETE FROM Notification WHERE Id = 17')       # dismissed: no news
         db.commit()
         notices.look()
-        self.assertEqual((len(heard), notices.newest), (1, 13))
+        self.assertEqual((len(heard), notices.newest), (1, 17))
         notices.stop()
         db.close()
 

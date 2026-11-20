@@ -27,8 +27,10 @@ NEW_TOASTS = """
                    AND s.SettingKey IN ('s:banner', 's:toast') AND s.Value = 0)
     FROM Notification n JOIN NotificationHandler h ON h.RecordId = n.HandlerId
     WHERE n.Type = 'toast' AND n.Id > ? ORDER BY n.Id"""
-# confirmations of the user's own action, never news: Snipping Tool's "Screenshot copied to clipboard"
-QUIET = {'Microsoft.ScreenSketch_8wekyb3d8bbwe!App'}
+# never brought out for: Snipping Tool's "Screenshot copied to clipboard" (the user's own action), and
+# the phone's notifications, messages and photos shown through Phone Link (nothing on the dock to see)
+QUIET = ('Microsoft.ScreenSketch_8wekyb3d8bbwe!', 'Microsoft.YourPhone_8wekyb3d8bbwe!',
+         'MicrosoftWindows.CrossDevice_cw5n1h2txyewy!')
 
 
 _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -82,8 +84,8 @@ def toasts_on() -> bool:
 class Notices(QObject):
     """Emits arrived(app) for each look that finds a new notification worth a look: shown as a banner
     (the app's banners are on in Windows Settings), not an update of one already seen (the same app,
-    tag and group: Claude's per-session status is replaced at every turn's end), and not a confirmation
-    of the user's own action (QUIET)."""
+    tag and group: Claude's per-session status is replaced at every turn's end), and not from QUIET
+    (a screenshot confirmation, or the phone's through Phone Link)."""
     arrived = Signal(str)
 
     def __init__(self, parent=None, path: str | None = None, every: int = EVERY):
@@ -142,7 +144,7 @@ class Notices(QObject):
             key = (app, tag, group)
             again = bool(tag or group) and key in self.seen
             self.seen[key] = now
-            if not first and banner and not again and app not in QUIET and not news:
+            if not first and banner and not again and not app.startswith(QUIET) and not news:
                 news = app
         if news and toasts_on():
             self.arrived.emit(news)

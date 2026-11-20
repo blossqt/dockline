@@ -168,7 +168,8 @@ class SettingsWindow(QWidget):
                    'A hidden dock appears briefly when an app requests attention or a timer ends.')
         self.check(system, 'Show the dock for notifications', 'alert_notices', 'alerts',
                    'Applies to apps with notification banners on in Windows Settings, at most once a '
-                   'minute. Updated notifications and screenshot confirmations are excluded.')
+                   'minute. Updated notifications, screenshot confirmations and phone notifications '
+                   'from Phone Link are excluded.')
         self.check(system, 'Start with Windows', 'startup', 'startup')
         pins_row = QHBoxLayout()
         import_pins = QPushButton('Import taskbar pins')
