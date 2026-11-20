@@ -68,7 +68,7 @@ from PySide6.QtCore import (QAbstractAnimation, QEasingCurve, QEvent, QObject, Q
                             QRect, QRectF, QSize, Qt, QSequentialAnimationGroup, QTimer, QVariantAnimation, Signal)
 from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QFont, QFontDatabase, QGuiApplication, QImage, QLinearGradient,
                            QFontMetricsF, QPainter, QPainterPath, QPalette, QPen, QPixmap, QRadialGradient, QRegion,
-                           QTextLayout)
+                           QTextLayout, QTransform)
 from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QAbstractSpinBox, QApplication, QCheckBox,
                                QComboBox, QDialog, QFrame, QGraphicsEffect, QLabel,
                                QGraphicsOpacityEffect, QLineEdit, QMainWindow, QMenuBar, QProgressBar, QProxyStyle,
@@ -77,6 +77,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QAbstract
 __all__ = ['ACCENT', 'ACCENT_HOVER', 'ON_ACCENT', 'ROSE', 'SuiteStyle', 'install', 'Colors', 'is_dark', 'veil',
            'colors', 'ink', 'font', 'serif', 'paint_shadow', 'card_style', 'liquid_controls_css', 'panel_css', 'panel_fill', 'GLASS_RADIUS',
            'LIQUID_RADIUS', 'glass_on', 'frost', 'paint_glass', 'css', 'fade_in', 'LOOKS', 'look', 'set_look',
+           'liquid_clear', 'set_liquid_clear', 'CLEAR_DEFAULT',
            'motion_on', 'motion_chosen', 'set_motion', 'MODES', 'mode', 'set_mode', 'app_mode', 'restyle',
            'on_restyle', 'light_up', 'BACKDROP_OPACITY', 'fade_out', 'stagger_in', 'GAME_DOWNLOADS',
            'game_quiet_chosen', 'set_game_quiet', 'game_downloads', 'set_game_downloads', 'game_in_front',
@@ -1153,6 +1154,49 @@ def set_look(name: str) -> None:
     _look_changed()
 
 
+CLEAR_DEFAULT = 50                              # the liquid glass's transparency, as it was before it could be set
+_clear_value: int | None = None
+
+
+def liquid_clear() -> int:
+    """How see-through the liquid glass is, 0 to 100, as chosen in Hanami: at 50 its tint is as it
+    has always been; higher thins it, to none at 100; lower thickens it, to twice at 0."""
+    global _clear_value
+    if _clear_value is None:
+        _clear_value = _read_clear()
+    return _clear_value
+
+
+def _read_clear() -> int:
+    value = os.environ.get('SUITE_LIQUID_CLEAR')            # tests and screenshots
+    if value is None:
+        value = _suite_value('LiquidClear')
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return CLEAR_DEFAULT
+
+
+def set_liquid_clear(value: int) -> None:
+    """Set the liquid glass's transparency (Hanami's settings do, as its slider moves): this app's
+    glass windows are drawn again at once, and every other app takes it within seconds. Only the
+    glass is drawn again - not every style sheet, as a change of look does - so dragging the slider
+    stays smooth."""
+    global _clear_value
+    import winreg
+    _clear_value = max(0, min(100, int(value)))
+    _set_suite_value('LiquidClear', winreg.REG_DWORD, _clear_value)
+    app = QApplication.instance()
+    for window in app.topLevelWidgets() if app is not None else ():
+        if window.isVisible() and window.property(_FROSTED):
+            window.update()
+
+
+def _clear_scaled(alpha: float) -> int:
+    """A liquid glass tint (0 to 255) as thick as the transparency chosen makes it."""
+    return int(max(0.0, min(255.0, alpha * (100 - liquid_clear()) / (100 - CLEAR_DEFAULT))))
+
+
 def motion_on() -> bool:
     """Whether the suite animates: unless turned off in Hanami (motion_chosen()), or in Windows
     (Settings > Accessibility > Visual effects > Animation effects)."""
@@ -1235,11 +1279,11 @@ def _apply_mode(starting: bool = False) -> None:
 def _look_changed() -> None:
     """The look, the animations or light or dark may have changed (in Hanami, or Windows): if so,
     take them."""
-    global _look, _motion, _mode
-    now = (_read_look(), _read_motion(), _read_mode())
-    if now != (_look, _motion, _mode):
+    global _look, _motion, _mode, _clear_value
+    now = (_read_look(), _read_motion(), _read_mode(), _read_clear())
+    if now != (_look, _motion, _mode, _clear_value):
         mode_changed = now[2] != _mode
-        _look, _motion, _mode = now
+        _look, _motion, _mode, _clear_value = now
         if mode_changed:
             _apply_mode()
         _suite_changed()
@@ -1861,20 +1905,28 @@ def _frosting() -> _Frosting:
 
 _MARGIN = 56              # how far beyond a window's edges its shot of the screen reaches
 _MARGIN_FRAMELESS = 160   # a pop-up's, further: one dragged fast stays within its last shot until the next comes
-# band: how far in from the rim the glass bends light; reach: how far beyond the edge the light
-# shown at the rim comes from, falling off towards the flat middle - by power over the band, or
-# (rate) as exp(-rate x distance in), a thin rim bending hard, as liquid-glass-js's "rim" does;
-# blur: how much the glass softens what is behind; steps: the rings it is drawn in; corner,
-# shrink: the rings' corners.
+# The glass's edge is a rounded bevel (_lens). band: how far in from the edge it reaches - at most
+# BEVEL_SHARE of the window's shorter side, so a slim toast keeps a flat middle; reach: how far
+# beyond the edge the light shown at the very rim comes from, less further in (steep at the rim,
+# flat where the bevel meets the middle, as light bends through a rounded edge); spread: how much
+# further red bends, and blue less, so colours part along the rim; step: the bevel is drawn in
+# lines this many pixels thick; blur: how much the glass softens what is behind.
+# Until 2026-11-20 the liquid bend reached only ~4 px in and was all but invisible (the user: "it
+# just looks transparent"); .dev\liquid\proto.py in Keytap renders the bevel over a photo.
 _LENSES = {
     # canvasui.dev's frosted cards (the user's wish, 2026-11-01): what is behind, flat and well
     # blurred (its backdrop-filter: blur(12px)) - no bending at the rim
-    'frosted': dict(band=1, reach=0, power=1.0, blur=12, steps=2, corner=GLASS_RADIUS, shrink=1.0),
-    'liquid': dict(band=9, reach=48, rate=0.55, blur=2, steps=10, corner=LIQUID_RADIUS, shrink=1.0),
-    # a framed window's rim, in either look: only the rings that bend in light from beyond its
-    # edges (the window itself fills the rest of its shot)
-    'rim': dict(band=5, reach=56, rate=0.55, blur=2, steps=6, corner=GLASS_RADIUS, shrink=1.0),
+    'frosted': dict(band=0, reach=0, spread=0.0, step=3, blur=12),
+    # dome: how much the face draws what is behind in towards its middle (glasslens.c)
+    'liquid': dict(band=36, reach=48, spread=0.1, step=3, blur=2, dome=0.15),
+    # a framed window's rim, in either look: only the bevel, bending in light from beyond its
+    # edges (the window itself fills the rest of its shot); no wider than _RIM_SPAN. A big window's
+    # rim is made again as it is dragged: glasslens.dll makes a 1400 x 900 one, colours parted, in
+    # about 1.3 ms; drawn with Qt (no library) its colours stay together, as parting them there
+    # took it from 2.5 ms to 6.5.
+    'rim': dict(band=12, reach=16, spread=0.1, step=3, blur=2),
 }
+BEVEL_SHARE = 0.3
 _LIVE_MS = 33             # how often a moving window takes the screen behind it again
 _SETTLE = 0.35            # and for how long after it stops
 _SHADOW = 24              # px around a pop-up that Windows' shadow for it can darken in a shot
@@ -2402,65 +2454,222 @@ def _lens_for(window: QWidget) -> QPixmap | None:
     return window._suite_lens
 
 
+GLASS_LENS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'glasslens.dll')
+_glass_lens = None                              # the library's glass_lens, False if it won't load
+
+
+class _PyBuffer(ctypes.Structure):
+    _fields_ = [('buf', ctypes.c_void_p), ('obj', ctypes.py_object), ('len', ctypes.c_ssize_t),
+                ('itemsize', ctypes.c_ssize_t), ('readonly', ctypes.c_int), ('ndim', ctypes.c_int),
+                ('format', ctypes.c_char_p), ('shape', ctypes.c_void_p), ('strides', ctypes.c_void_p),
+                ('suboffsets', ctypes.c_void_p), ('internal', ctypes.c_void_p)]
+
+
+def _lens_library():
+    """glasslens.dll's glass_lens (glasslens.c beside this file), or None if it is not there."""
+    global _glass_lens
+    if _glass_lens is None:
+        try:
+            lens = ctypes.CDLL(GLASS_LENS_FILE).glass_lens
+            lens.argtypes = ([ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int] * 2
+                             + [ctypes.c_float] * 7 + [ctypes.c_int])
+            lens.restype = ctypes.c_int
+            _glass_lens = lens
+        except (OSError, AttributeError):
+            _glass_lens = False
+    return _glass_lens or None
+
+
+def _pixels_of(image: QImage):
+    """Where an image's pixels are, without copying them: its constBits(), which Python only lends
+    read-only (bits() would copy a shot shared with its pixmap, 0.2 ms for a pop-up's)."""
+    view = image.constBits()
+    held = _PyBuffer()
+    ctypes.pythonapi.PyObject_GetBuffer(ctypes.py_object(view), ctypes.byref(held), 0)
+    try:
+        return held.buf
+    finally:
+        ctypes.pythonapi.PyBuffer_Release(ctypes.byref(held))
+
+
 def _lens(shot: QPixmap, x: float, y: float, width: int, height: int, spec: dict,
           rim_only: bool = False) -> QPixmap:
-    """Glass width x height, for a window at (x, y) in the shot: each ring in from the rim drawn
-    from a little more of what lies beyond the window's edges, the middle as it is (or, rim_only,
-    left out)."""
+    """Glass width x height, for a window at (x, y) in the shot: what is behind bent through a
+    gently domed face (the middle shows it a little larger) and a rounded bevel round its edges,
+    which bends in what lies beyond them - red a little further and blue a little less (spread),
+    so colours part where the bending is strong. With rim_only, only the bevel (the middle left
+    out). The caller clips it to the window's rounded shape.
+
+    Pixel by pixel, in glasslens.dll (built from glasslens.c): a pop-up's glass in about a
+    millisecond. Without the library, the bevel is drawn with Qt, in lines, and the face is flat."""
+    lens = _lens_library()
+    band = min(spec['band'], BEVEL_SHARE * min(width, height))
+    if lens is not None and (band >= 1 or spec.get('dome')):
+        image = shot.toImage()
+        if image.format() not in (QImage.Format_RGB32, QImage.Format_ARGB32_Premultiplied):
+            image = image.convertToFormat(QImage.Format_ARGB32_Premultiplied)
+        dpr = shot.devicePixelRatio()
+        out = QImage(max(1, round(width * dpr)), max(1, round(height * dpr)), QImage.Format_ARGB32_Premultiplied)
+        out.setDevicePixelRatio(dpr)
+        reach = spec['reach'] * band / spec['band'] if spec['band'] else 0.0
+        corner = GLASS_RADIUS if rim_only else LIQUID_RADIUS
+        done = lens(_pixels_of(image), image.width(), image.height(), image.bytesPerLine(),
+                    _pixels_of(out), out.width(), out.height(), out.bytesPerLine(),
+                    x * dpr, y * dpr, corner * dpr, band * dpr, reach * dpr,
+                    0.0 if rim_only else spec.get('dome', 0.0), spec['spread'], 1 if rim_only else 0)
+        if done == 0:
+            return QPixmap.fromImage(out)
+    band, lines = _bevel(width, height, spec)
+    spread = 0.0 if rim_only else spec['spread']
+    sides = {right: _turned_side(shot, x, y, width, height, lines, 1 + spread, right)
+             for right in (False, True)} if lines else {}
+    green = _bevel_pass(shot, x, y, width, height, lines, 1.0, sides, middle=not rim_only)
+    # Red and blue part only where they would land at least half a pixel apart: the outer part of
+    # the bevel, where it bends most (the lines run from the rim in, bending less and less).
+    parting = [line for line in lines if line[2] * spread >= 0.5]
+    if parting:
+        # Red and blue, each bent its own way, take the place of the green pass's own there; the
+        # rest, where they would part by less, keeps all three as they are.
+        lines, band = parting, parting[-1][0] + parting[-1][1]
+        whole = QRectF(0, 0, width, height)
+        inset = math.floor(band)                        # never past the parting lines
+        bevel = QRegion(0, 0, width, height).subtracted(
+            QRegion(inset, inset, width - 2 * inset, height - 2 * inset))
+        painter = QPainter(green)
+        painter.setClipRegion(bevel)
+        painter.setCompositionMode(QPainter.CompositionMode_Multiply)
+        painter.fillRect(whole, QColor(0, 255, 0))
+        painter.setCompositionMode(QPainter.CompositionMode_Plus)
+        for scale, keep in ((1 + spread, QColor(255, 0, 0)), (1 - spread, QColor(0, 0, 255))):
+            # only its bevel is used, so what is beyond it can stay as the new image had it
+            part = _bevel_pass(shot, x, y, width, height, lines, scale, sides, middle=False, clear=False)
+            tint = QPainter(part)
+            tint.setClipRegion(bevel)
+            tint.setCompositionMode(QPainter.CompositionMode_Multiply)
+            tint.fillRect(whole, keep)
+            tint.end()
+            painter.drawImage(whole, part)
+        painter.end()
+    return QPixmap.fromImage(green)
+
+
+def _bevel(width: int, height: int, spec: dict) -> tuple:
+    """A window's bevel: how wide it is, and its lines from the rim in - each (how far in, how
+    thick, how far out what its outer and its inner edge show comes from). Each line's inner edge
+    takes up where the next one's outer edge does, so the bend is one smooth curve."""
+    band = min(spec['band'], BEVEL_SHARE * min(width, height))
+    if band < 1 or not spec['reach']:
+        return 0.0, []
+    reach = spec['reach'] * band / spec['band']
+    count = max(2, round(band / spec['step']))
+
+    def shift(i: int) -> float:
+        u = 1 - i / count                               # 1 at the rim, 0 where the glass is flat
+        return reach * (1 - math.sqrt(max(0.0, 1 - u * u)))
+
+    return band, [(band * i / count, band / count, shift(i), shift(i + 1)) for i in range(count)]
+
+
+def _bevel_pass(shot: QPixmap, x: float, y: float, width: int, height: int, lines: list,
+                scale: float, sides: dict, middle: bool, clear: bool = True) -> QImage:
+    """The bevel, bent by scale times its own amount, drawn as a mitred frame of lines, each from a
+    little further out than where it lies; the middle drawn too if asked. Without clear, what is
+    neither is left as the new image had it (for a pass of which only the bevel is used)."""
     dpr = shot.devicePixelRatio()
-    out = QPixmap(max(1, round(width * dpr)), max(1, round(height * dpr)))
+    room_x, room_y = shot.width() / dpr, shot.height() / dpr
+    out = QImage(max(1, round(width * dpr)), max(1, round(height * dpr)), QImage.Format_ARGB32_Premultiplied)
     out.setDevicePixelRatio(dpr)
-    out.fill(Qt.transparent)
+    if clear and not middle:                            # the middle covers it all
+        out.fill(Qt.transparent)
     painter = QPainter(out)
     painter.setRenderHint(QPainter.SmoothPixmapTransform)
-    full = QRectF(0, 0, width, height)
-    room_x, room_y = shot.width() / dpr, shot.height() / dpr
-    rings = _rings(width, height, spec)
-    for ring, reach in rings[:-1] if rim_only else rings:
-        painter.setClipPath(ring)
-        w, h = width + 2 * reach, height + 2 * reach
-        left = min(max(x - reach, 0.0), max(0.0, room_x - w))     # kept inside the shot
-        top = min(max(y - reach, 0.0), max(0.0, room_y - h))
-        painter.drawPixmap(full, shot, QRectF(left * dpr, top * dpr, w * dpr, h * dpr))
+
+    def take(to: QRectF, sx: float, sy: float, sw: float, sh: float) -> None:
+        sx = min(max(sx, 0.0), max(0.0, room_x - sw))   # kept inside the shot
+        sy = min(max(sy, 0.0), max(0.0, room_y - sh))
+        painter.drawPixmap(to, shot, QRectF(sx * dpr, sy * dpr, sw * dpr, sh * dpr))
+
+    if middle:
+        painter.setCompositionMode(QPainter.CompositionMode_Source)
+        take(QRectF(0, 0, width, height), x, y, width, height)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+    for d, thick, outer, inner in lines:
+        outer, inner = outer * scale, inner * scale
+        deep = thick + outer - inner                    # how much of what is beyond the line takes
+        along = (outer + inner) / 2                     # and how far it is squeezed in along it
+        span = width - 2 * d                            # top and bottom
+        if span > 0:
+            wide = span + 2 * along * span / width
+            take(QRectF(d, d, span, thick), x + d - (wide - span) / 2, y + d - outer, wide, deep)
+            take(QRectF(d, height - d - thick, span, thick), x + d - (wide - span) / 2,
+                 y + height - d - thick + inner, wide, deep)
+    for right, turned in sides.items():
+        if turned is not None:
+            _bevel_side(painter, turned, x, y, width, height, lines, scale, right, dpr)
     painter.end()
     return out
 
 
-_ring_cache: dict = {}
+_TRANSPOSE = QTransform(0, 1, 1, 0, 0, 0)       # x for y: a column becomes a row, and back
 
 
-def _rings(width: int, height: int, spec: dict) -> list:
-    """The lens's rings for a window's size, each with how far beyond the edges it reaches - from
-    the rim in to the flat middle, each ring only its own band (the middle whole)."""
-    key = (width, height, tuple(sorted(spec.items())))
-    rings = _ring_cache.get(key)
-    if rings is None:
-        if len(_ring_cache) > 24:
-            _ring_cache.clear()
-        full = QRectF(0, 0, width, height)
-        shapes = []
-        for i in range(spec['steps']):
-            t = i / (spec['steps'] - 1)                     # 0 at the rim, 1 where the glass is flat
-            inset = spec['band'] * t
-            corner = max(2.0, spec['corner'] - inset * spec['shrink'])
-            shape = QPainterPath()
-            shape.addRoundedRect(full.adjusted(inset, inset, -inset, -inset), corner, corner)
-            if t >= 1:
-                reach = 0.0
-            elif 'rate' in spec:
-                reach = spec['reach'] * math.exp(-spec['rate'] * inset)
-            else:
-                reach = spec['reach'] * (1 - t) ** spec['power']
-            shapes.append((shape, reach))
-        rings = []
-        for i, (shape, reach) in enumerate(shapes):
-            ring = QPainterPath(shape)
-            if i + 1 < len(shapes):
-                ring.addPath(shapes[i + 1][0])
-                ring.setFillRule(Qt.OddEvenFill)
-            rings.append((ring, reach))
-        _ring_cache[key] = rings
-    return rings
+def _turned_side(shot: QPixmap, x: float, y: float, width: int, height: int, lines: list,
+                 widest: float, right: bool) -> tuple | None:
+    """The part of the screen one side of the bevel takes from (bent at most widest times its own
+    amount), turned on its side - with where it starts in the shot.
+
+    The sides are drawn on their side: Qt scales a tall, thin strip about twenty times slower than
+    a wide, flat one (~50 us against ~3 for each line of a big window), so each side's part of the
+    screen is turned once so its lines run across, drawn as the top and bottom are, and turned
+    back (_bevel_side)."""
+    dpr = shot.devicePixelRatio()
+    room_x, room_y = shot.width() / dpr, shot.height() / dpr
+    band = lines[-1][0] + lines[-1][1]
+    most = lines[0][2] * widest + 2                     # the furthest out any line takes from
+    lo, hi = (x + width - band - 2, x + width + most) if right else (x - most, x + band + 2)
+    lo, hi = max(0.0, lo), min(room_x, hi)
+    top, bottom = max(0.0, y - most), min(room_y, y + height + most)
+    if hi - lo < 1 or bottom - top < 1:
+        return None
+    part = QRect(math.floor(lo * dpr), math.floor(top * dpr), math.ceil((hi - lo) * dpr),
+                 math.ceil((bottom - top) * dpr))
+    turned = shot.copy(part).toImage().transformed(_TRANSPOSE)
+    turned.setDevicePixelRatio(dpr)
+    return turned, part.x() / dpr, part.y() / dpr
+
+
+def _bevel_side(painter: QPainter, side: tuple, x: float, y: float, width: int, height: int,
+                lines: list, scale: float, right: bool, dpr: float) -> None:
+    """One side of the bevel (_bevel_pass), drawn from its part of the screen turned on its side
+    (_turned_side), then turned back into place."""
+    turned, ox, oy = side
+    band = lines[-1][0] + lines[-1][1]
+    near = math.floor(width - band - 1) if right else 0
+    drawn = QImage(max(1, round(height * dpr)), max(1, round((math.ceil(band) + 2) * dpr)),
+                   QImage.Format_ARGB32_Premultiplied)
+    drawn.setDevicePixelRatio(dpr)
+    drawn.fill(Qt.transparent)                          # its ends lie over the top and bottom's mitres
+    paint = QPainter(drawn)
+    paint.setRenderHint(QPainter.SmoothPixmapTransform)
+    tw, th = turned.width() / dpr, turned.height() / dpr
+    for d, thick, outer, inner in lines:
+        outer, inner = outer * scale, inner * scale
+        span = height - 2 * d - 2 * thick
+        if span <= 0:
+            continue
+        deep = thick + outer - inner
+        tall = span + (outer + inner) * span / height
+        along = y + d + thick - (tall - span) / 2 - oy  # along the side, in the turned strip
+        across = (x + width - d - thick + inner if right else x + d - outer) - ox
+        along = min(max(along, 0.0), max(0.0, tw - tall))
+        across = min(max(across, 0.0), max(0.0, th - deep))
+        at = (width - d - thick if right else d) - near
+        paint.drawImage(QRectF(d + thick, at, span, thick), turned,
+                        QRectF(along * dpr, across * dpr, tall * dpr, deep * dpr))
+    paint.end()
+    back = drawn.transformed(_TRANSPOSE)
+    back.setDevicePixelRatio(dpr)
+    painter.drawImage(QPointF(near, 0), back)
 
 
 def _live(window: QWidget) -> bool:
@@ -2834,10 +3043,10 @@ def _clear_tint(window: QWidget) -> int:
     holds more text than a pop-up."""
     mean, busy = getattr(window, '_suite_tone', None) or (0.5, 0.05)
     if is_dark():
-        return int(min(235, 110 + 160 * max(0.0, mean - 0.25) + 900 * busy))
+        return _clear_scaled(min(235, 110 + 160 * max(0.0, mean - 0.25) + 900 * busy))
     # Up to 235, as dark, and sooner: at 215 (and 900 a unit of busy) a page of text behind still
     # competed with a menu bar's words.
-    return int(min(235, 40 + 130 * max(0.0, 0.7 - mean) + 1200 * busy))
+    return _clear_scaled(min(235, 40 + 130 * max(0.0, 0.7 - mean) + 1200 * busy))
 
 
 def _paint_clear(window: QWidget, event) -> None:
@@ -2910,8 +3119,8 @@ def _liquid_tint(window: QWidget) -> int:
     (under light text) or dark (under dark text), or busy, as a page of text is."""
     mean, busy = getattr(window, '_suite_tone', None) or (0.5, 0.05)
     if is_dark():
-        return int(min(200, 64 + 160 * max(0.0, mean - 0.25) + 600 * busy))
-    return int(min(160, 40 + 130 * max(0.0, 0.7 - mean) + 500 * busy))
+        return _clear_scaled(min(200, 64 + 160 * max(0.0, mean - 0.25) + 600 * busy))
+    return _clear_scaled(min(160, 40 + 130 * max(0.0, 0.7 - mean) + 500 * busy))
 
 
 def _paint_liquid(painter, rect, window: QWidget, lens: QPixmap) -> None:
