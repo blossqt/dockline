@@ -22,8 +22,7 @@ a = Analysis(
     [os.path.join(app_dir, 'main.py')],
     pathex=[app_dir],
     binaries=qt_plugin_binaries,
-    # the liquid glass, pixel by pixel (Hanami's glasslens.c, copied by its check_copies.py)
-    datas=[(os.path.join(app_dir, 'dockline', 'glasslens.dll'), 'dockline')],
+    datas=[],
     hiddenimports=['dockline', 'dockline.app', 'dockline.dock', 'dockline.widgets', 'dockline.picker',
                    'dockline.settings_window', 'dockline.media', 'dockline.ai', 'PySide6.QtNetwork',
                    'winrt.runtime', 'winrt.system', 'winrt.windows.foundation',
