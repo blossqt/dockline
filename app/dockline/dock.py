@@ -103,6 +103,12 @@ class Dock(QWidget):
         self.cfg = cfg
         self.testing = testing
         self.main = main                      # the main display's dock: widgets, Settings, the taskbar
+        if not testing:
+            # The Glass style is the suite's Frosted: the screen behind the bar, blurred (taken and
+            # kept up as every suite pop-up's is), under the suite's tint - and as see-through as
+            # Hanami's Settings > Appearance > Glass says, followed within seconds.
+            theme.frost(self, fade=False)
+            theme.on_restyle(lambda: self.changed_here('opacity'))
         self.target_screen = screen or QGuiApplication.primaryScreen()
         self._screen_connected = False
         self.multi = False                    # docks on more than one display
@@ -421,14 +427,18 @@ class Dock(QWidget):
         self._fit = motion.run(self, motion.OPEN_MS, step, done)
 
     def glass_fill(self) -> QColor:
-        """The Glass style's tint: as clear as Settings' Glass opacity says."""
+        """The Glass style's tint: the suite's frosted one (black on dark, white on light), as clear as
+        Hanami's Settings > Appearance > Glass says."""
         look = self.look
         if not look.glass:
             return look.c(look.bar)
-        share = max(0, min(100, int(self.cfg.get('glass_opacity', 18)))) / 100
-        tint = QColor(16, 16, 22) if look.dark else QColor(255, 255, 255)
-        tint.setAlpha(max(2, round(255 * share)))      # never quite 0: clicks would go through
+        tint = QColor(0, 0, 0) if look.dark else QColor(255, 255, 255)
+        tint.setAlpha(max(2, theme._clear_scaled(64 if look.dark else 56)))   # never quite 0: clicks would go through
         return tint
+
+    def glass_percent(self) -> int:
+        """The Glass style's tint, in percent, for the Settings window's own glass."""
+        return round(self.glass_fill().alpha() * 100 / 255) if self.look.glass else 18
 
     def open_tray(self) -> None:
         """Windows' own panel of the notification area's hidden icons (background apps). With the
@@ -826,7 +836,7 @@ class Dock(QWidget):
         look = self.look
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         if look.glass:
-            L.paint_clear_glass(painter, rect, 14, self.glass_fill(), look.dark)
+            theme.paint_glass(painter, QRectF(self.rect()), 14)    # the suite's frosted glass
             return
         painter.setPen(QPen(look.c(look.edge), 1))
         painter.setBrush(look.c(look.bar))

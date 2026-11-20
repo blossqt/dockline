@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QBrush, QColor, QFont, QFontDatabase, QIcon, QLinearGradient, QPainter,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap)
 
 # Neutral colours (the person's wish): white on dark and near-black on light for what is chosen,
@@ -233,22 +233,15 @@ def app_icon() -> QIcon:
 # ---------------------------------------------------------------- style sheets
 
 def paint_clear_glass(painter: QPainter, rect: QRectF, radius: float, fill: QColor, dark: bool) -> None:
-    """The Glass style's pane, for the dock and everything that opens from it: an even tint (Settings'
-    Glass opacity), a fine light line along the top and a thin rim - no grey sheen."""
+    """The Glass style's pane, for everything that opens from the dock: the suite's frosted glass - an
+    even tint over what is behind, blurred (paint_backdrop), and a hairline round its edge, as the
+    suite's pop-ups have (suitetheme._paint_frosted). No rim of light."""
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
     painter.fillPath(path, fill)
     painter.setBrush(Qt.NoBrush)
-    painter.setPen(QPen(QColor(255, 255, 255, 30) if dark else QColor(0, 0, 0, 26), 1))
+    painter.setPen(QPen(QColor(255, 255, 255, 26) if dark else QColor(0, 0, 0, 22), 1))
     painter.drawPath(path)
-    inner = QPainterPath()
-    top = rect.adjusted(1, 1, -1, -1)
-    inner.addRoundedRect(top, max(0.0, radius - 1), max(0.0, radius - 1))
-    light = QLinearGradient(top.topLeft(), top.bottomLeft())
-    light.setColorAt(0.0, QColor(255, 255, 255, 46 if dark else 170))
-    light.setColorAt(min(1.0, 3 / max(top.height(), 1)), QColor(255, 255, 255, 0))
-    painter.setPen(QPen(QBrush(light), 1))
-    painter.drawPath(inner)
 
 
 def frosted_behind(where) -> QPixmap | None:
@@ -375,7 +368,7 @@ WINDOW_STYLES = {
 
 def settings_css(look: 'Look', opacity: int = 18) -> str:
     """The Settings window in the dock's style: Black, White and Midnight in their solid colours;
-    Glass see-through to Windows' blur behind the window, tinted as the dock is (Glass opacity), with
+    Glass see-through to Windows' blur behind the window, tinted as the dock is (Dock.glass_percent), with
     its panels on firmer ground so what is read stays readable."""
     if look.glass:
         share = max(0, min(100, int(opacity))) / 100

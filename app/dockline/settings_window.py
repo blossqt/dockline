@@ -6,7 +6,7 @@ import threading
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QPushButton, QScrollArea, QSlider, QStackedWidget, QVBoxLayout,
+                               QListWidget, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout,
                                QWidget)
 
 from . import __version__
@@ -108,29 +108,9 @@ class SettingsWindow(QWidget):
         appearance = self.section(layout, 'Appearance')
         self.row(appearance, 'Style', _choice([(k, L.LOOKS[k].label) for k in L.STYLES], cfg['look'],
                                               lambda v: self.set('look', v, 'look', rebuild=True)))
-        opacity_row = QHBoxLayout()
-        opacity_row.setSpacing(12)
-        opacity = QSlider(Qt.Horizontal)
-        opacity.setRange(0, 80)
-        opacity.setValue(int(cfg['glass_opacity']))
-        opacity.setFocusPolicy(Qt.NoFocus)
-        opacity_value = QLabel(f"{int(cfg['glass_opacity'])}%")
-        opacity_value.setFixedWidth(44)
-
-        def opacity_changed(value):
-            opacity_value.setText(f'{value}%')
-            self.cfg['glass_opacity'] = value
-            self.dock.changed('opacity')
-            if self.dock.look.glass:
-                self.restyle_later.start()           # this window's tint follows too
-
-        opacity.valueChanged.connect(opacity_changed)
-        opacity_row.addWidget(opacity, 1)
-        opacity_row.addWidget(opacity_value)
-        self.row(appearance, 'Glass opacity', opacity_row)
-        opacity_note = QLabel('Applies to the Glass style. Lower values are clearer.')
-        opacity_note.setObjectName('sub')
-        appearance.addWidget(opacity_note)
+        glass_note = QLabel('Glass transparency is set in Hanami: Settings > Appearance > Glass.')
+        glass_note.setObjectName('sub')
+        appearance.addWidget(glass_note)
         self.row(appearance, 'Dock size', _choice([('S', 'Small'), ('M', 'Medium'), ('L', 'Large')], cfg['size'],
                                                   lambda v: self.set('size', v, 'size')))
         self.row(appearance, 'Position', _choice([('bottom', 'Bottom'), ('top', 'Top')], cfg['edge'],
@@ -299,8 +279,8 @@ class SettingsWindow(QWidget):
         return box
 
     def restyle(self) -> None:
-        """The dock's style, now (and its glass opacity)."""
-        self.setStyleSheet(L.settings_css(self.dock.look, self.cfg.get('glass_opacity', 18)))
+        """The dock's style, now (and its glass's tint)."""
+        self.setStyleSheet(L.settings_css(self.dock.look, self.dock.glass_percent()))
 
     def showEvent(self, event):
         super().showEvent(event)

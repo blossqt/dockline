@@ -28,7 +28,7 @@ DEFAULTS = {
     'pins_imported': False,     # the Windows taskbar's pins were brought over once
     'app_order': [],            # the apps' order as arranged by dragging
     'offered': [],              # new widgets already added once
-    'glass_opacity': 18,        # the Glass style's tint, in percent: lower is clearer
+    'glass_opacity': 18,        # no longer used: the Glass style's tint is Hanami's (Settings > Appearance > Glass)
     'ai_show_used': False,      # False: percent left; True: percent used
     'ai_tile_style': 'rings',   # rings, gauges, or bars on the dock widget
     'ai_refresh': 'live',       # live (watch local sessions + 45s sync), 30s, 1m, or 5m

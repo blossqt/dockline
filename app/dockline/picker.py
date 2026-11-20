@@ -92,7 +92,7 @@ class Picker(QWidget):
         self.setWindowIcon(L.app_icon())
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setObjectName('window')
-        self.setStyleSheet(L.settings_css(dock.look, dock.cfg.get('glass_opacity', 18)))
+        self.setStyleSheet(L.settings_css(dock.look, dock.glass_percent()))
         self.resize(900, 640)
 
         side = QVBoxLayout()
