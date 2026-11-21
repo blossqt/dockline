@@ -143,6 +143,8 @@ def main(argv: list[str]) -> int:
     # widgets their window was no longer active - where all five of Dockline's crashes were.
     app.removeEventFilter(theme._wheels())
     app.setFont(L.font(14))
+    from . import glassfix
+    glassfix.install()                       # the bar's glass leaves Dockline's own windows out of its picture
 
     name = f'Dockline-{getpass.getuser()}'
     other = QLocalSocket()

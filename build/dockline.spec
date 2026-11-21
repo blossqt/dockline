@@ -23,7 +23,7 @@ a = Analysis(
     pathex=[app_dir],
     binaries=qt_plugin_binaries,
     datas=[],
-    hiddenimports=['dockline', 'dockline.app', 'dockline.dock', 'dockline.widgets', 'dockline.picker',
+    hiddenimports=['dockline', 'dockline.app', 'dockline.dock', 'dockline.widgets', 'dockline.picker', 'dockline.glassfix',
                    'dockline.settings_window', 'dockline.media', 'dockline.ai', 'PySide6.QtNetwork',
                    'winrt.runtime', 'winrt.system', 'winrt.windows.foundation',
                    'winrt.windows.foundation.collections', 'winrt.windows.media.control',

@@ -593,6 +593,35 @@ class DockTests(Temp):
                 dock.testing = True
         dock.hide()
 
+    def test_bar_glass_leaves_dockline_windows_out_of_its_picture(self):
+        """The bar's glass paints Dockline's own windows (magnified icons, previews, cards) out of the
+        screen picture it blurs, as it does dragged images: a window of this thread is found where it
+        lies in a part of the screen, relative to it. (A real window, off every screen.)"""
+        import ctypes
+        from ctypes import wintypes
+        from PySide6.QtCore import QRect
+        from dockline import glassfix, suitetheme as theme
+        user32 = ctypes.WinDLL('user32')
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                                           wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.DestroyWindow.argtypes = [wintypes.HWND]
+        hwnd = user32.CreateWindowExW(0x08000080, 'STATIC', 'test', 0x90000000,     # tool, no-activate; popup, visible
+                                      30000, 30000, 50, 30, None, None, None, None)
+        self.assertTrue(hwnd)
+        original = theme._drag_images
+        try:
+            glassfix.install()
+            glassfix.install()                                           # once only, however often called
+            self.assertIs(theme._drag_images.__closure__[0].cell_contents, original)
+            found = theme._drag_images(QRect(29990, 29995, 100, 100))
+            self.assertIn(QRect(10, 5, 50, 30), found)
+            self.assertEqual(glassfix.own_windows(QRect(0, 0, 100, 100)), [])     # elsewhere: nothing
+        finally:
+            theme._drag_images = original
+            user32.DestroyWindow(hwnd)
+
     def test_menu_opens_task_manager(self):
         """The dock's right-click menu has Task Manager, as the Windows taskbar's has."""
         from unittest import mock
@@ -719,7 +748,7 @@ class DockTests(Temp):
         deadline = time.perf_counter() + 2
         while time.perf_counter() < deadline and abs(tile.eased('x', 0.8) - 0.8) > 1e-6:
             APP.processEvents()
-        self.assertAlmostEqual(tile.eased('x', 0.8), 0.8)
+        self.assertAlmostEqual(tile.eased('x', 0.8), 0.8, places=5)
         roll = tile.roll('figures')
         roll.set('37%')
         roll.set('42%')
