@@ -3029,6 +3029,33 @@ class _UsageRingCell(QWidget):
             L.text(painter, QRectF(0, 76, w, 18), reset_text, look.c(look.sub), 11, 400, Qt.AlignCenter)
 
 
+def _money(amount: float, currency: str = 'USD') -> str:
+    sign = '$' if currency.upper() == 'USD' else f'{currency.upper()} '
+    return f'{sign}{amount:,.2f}'
+
+
+def _cost_lines(state: dict) -> list[str]:
+    """A service's money lines on the AI card: its usage credits (spent this month, of the limit, or
+    off), and what its use in the plan's windows would cost at API prices (Claude Code on this PC)."""
+    lines = []
+    estimate = state.get('estimate') or {}
+    parts = [f'{_money(estimate[key])} {name}' for key, name in (('session', 'this session'),
+                                                                   ('weekly', 'this week')) if key in estimate]
+    if parts:
+        lines.append('Estimated API cost: ' + ', '.join(parts) + '. Claude Code on this PC, at API prices.')
+    spend = state.get('spend')
+    if isinstance(spend, dict) and spend.get('used') is not None:
+        currency = spend.get('currency') or 'USD'
+        used = _money(spend['used'], currency)
+        if not spend.get('enabled'):
+            lines.append(f'Usage credits: Off ({used} used this month)')
+        elif spend.get('limit'):
+            lines.append(f'Usage credits: {used} of {_money(spend["limit"], currency)} used this month')
+        else:
+            lines.append(f'Usage credits: {used} used this month')
+    return lines
+
+
 class _AITile(Tile):
     GROUP = 'AI'
     PROVIDER = ''
@@ -3437,6 +3464,8 @@ class _AITile(Tile):
                     self._card_rows.append((provider, idx, ring_cell))
                     grid.addWidget(ring_cell, idx // 4, idx % 4)
                 block_lay.addLayout(grid)
+                for line in _cost_lines(state):              # usage credits and the API price estimate
+                    block_lay.addWidget(_label(line, 'sub'))
                 if state.get('error'):                       # the last reading is kept: why it is not newer
                     block_lay.addWidget(_label(state['error'], 'sub'))
             else:

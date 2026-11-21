@@ -1274,6 +1274,63 @@ class AIUsageTests(Temp):
         self.assertEqual(got['claude']['error'], ai.RATE_LIMITED)
         self.assertEqual(got['claude']['windows'][0]['used'], 55.0)
 
+    def test_reply_cost_at_api_prices(self):
+        """A reply priced as the API would bill it: input, output, both cache writes (1.25x and 2x the
+        input price) and cache reads at the model's own rate; fast mode twice; unknown models none."""
+        from dockline import ai
+        usage = {'input_tokens': 1_000_000, 'output_tokens': 1_000_000, 'cache_read_input_tokens': 1_000_000,
+                 'cache_creation_input_tokens': 2_000_000,
+                 'cache_creation': {'ephemeral_5m_input_tokens': 1_000_000, 'ephemeral_1h_input_tokens': 1_000_000}}
+        # Opus 5.5: $4 in, $20 out, $0.20 read, $5 5-minute write, $8 1-hour write
+        self.assertAlmostEqual(ai.claude_reply_cost('claude-opus-5-5', usage), 4 + 20 + 0.2 + 5 + 8)
+        self.assertAlmostEqual(ai.claude_reply_cost('claude-opus-5-5', {**usage, 'speed': 'fast'}), 2 * 37.2)
+        self.assertAlmostEqual(ai.claude_reply_cost('claude-opus-5', usage), 5 + 25 + 0.5 + 6.25 + 10)
+        self.assertAlmostEqual(ai.claude_reply_cost('claude-sonnet-5-5', {'input_tokens': 1_000_000,
+                                                                          'cache_creation_input_tokens': 1_000_000}),
+                               2 + 2.5)                                  # no split given: 5-minute writes
+        self.assertIsNone(ai.claude_reply_cost('<synthetic>', usage))
+
+    def test_claude_code_cost_by_plan_window(self):
+        """Replies read from the transcripts once each (a streamed reply's last line counts), only what
+        was added on later looks, and summed from each window's start (its reset less its length)."""
+        import json
+        import time
+        from dockline import ai
+        projects = self.folder / '.claude' / 'projects' / 'p'
+        projects.mkdir(parents=True)
+        log = projects / 's.jsonl'
+        now = time.time()
+
+        def reply(mid, hours_ago, out):
+            return json.dumps({'type': 'assistant', 'timestamp': now - hours_ago * 3600,
+                               'message': {'id': mid, 'model': 'claude-opus-5-5',
+                                           'usage': {'input_tokens': 0, 'output_tokens': out}}}) + '\n'
+
+        log.write_text(reply('a', 1, 10_000) + reply('a', 1, 50_000) + reply('b', 30, 100_000)
+                       + reply('c', 300, 100_000) + '{"type": "user"}\n', 'utf-8')
+        costs = ai.ClaudeCosts(self.folder / '.claude' / 'projects')
+        windows = [{'key': 'session', 'resets_at': now + 3600}, {'key': 'weekly', 'resets_at': now + 86400}]
+        self.assertEqual(costs.estimate(windows, now), {'session': 1.0, 'weekly': 3.0})   # $20 a million out
+        with open(log, 'a', encoding='utf-8') as handle:
+            handle.write(reply('d', 0.5, 50_000) + '{"partial')
+        self.assertEqual(costs.estimate(windows, now), {'session': 2.0, 'weekly': 4.0})
+        self.assertEqual(costs.read_to[str(log)][0], log.stat().st_size - len('{"partial'))
+
+    def test_usage_credits_and_cost_lines(self):
+        from dockline import ai, widgets
+        spend = ai.parse_claude_spend({'spend': {'used': {'amount_minor': 1234, 'currency': 'USD', 'exponent': 2},
+                                                 'limit': {'amount_minor': 5000, 'currency': 'USD', 'exponent': 2},
+                                                 'enabled': True}})
+        self.assertEqual(spend, {'used': 12.34, 'limit': 50.0, 'enabled': True, 'currency': 'USD'})
+        off = ai.parse_claude_spend({'spend': {'used': {'amount_minor': 0, 'currency': 'USD', 'exponent': 2},
+                                               'limit': None, 'enabled': False}})
+        lines = widgets._cost_lines({'spend': off, 'estimate': {'session': 15.7382, 'weekly': 1218.7}})
+        self.assertEqual(lines, ['Estimated API cost: $15.74 this session, $1,218.70 this week. '
+                                 'Claude Code on this PC, at API prices.',
+                                 'Usage credits: Off ($0.00 used this month)'])
+        self.assertEqual(widgets._cost_lines({'spend': spend}), ['Usage credits: $12.34 of $50.00 used this month'])
+        self.assertEqual(widgets._cost_lines({}), [])
+
     def test_parsers_and_reset_timers(self):
         import json
         import time

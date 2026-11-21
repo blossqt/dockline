@@ -13,6 +13,8 @@ What it does in the taskbar's place:
   with art, title and controls, turned with the scroll wheel, as Android's media player.
 - Volume per app in the Sound card; a draggable progress bar on each media page.
 - AI usage trackers (AI Limits, Claude, ChatGPT and Gemini) showing remaining allowance and reset timers from your existing local sign-ins, with live updates as you use them.
+  Claude's card also shows usage credits and what Claude Code's use on this PC would cost at API
+  prices, this session and this week.
 - Settings > Backup exports and imports every setting, pinned shortcuts included.
 - Previews on hover (and on a click on an app with several windows), close above the dock; resting on
   one shows that window alone (Windows' own live preview). Moving along the dock, they glide from app

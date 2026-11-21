@@ -608,6 +608,170 @@ def parse_claude_usage(data: dict) -> list[dict]:
     return windows
 
 
+def parse_claude_spend(data: dict) -> dict | None:
+    """The account's usage credits (Claude's extra usage, which covers use past the plan's limits):
+    what has been spent this month, the monthly limit if one is set, and whether they are on. From the
+    same /api/oauth/usage payload; None when it carries none."""
+    if not isinstance(data, dict):
+        return None
+    spend = data.get('spend')
+    if isinstance(spend, dict) and isinstance(spend.get('used'), dict):
+        def money(entry):
+            if not isinstance(entry, dict) or entry.get('amount_minor') is None:
+                return None
+            try:
+                return float(entry['amount_minor']) / 10 ** int(entry.get('exponent') or 0)
+            except (TypeError, ValueError):
+                return None
+        used = money(spend['used'])
+        if used is None:
+            return None
+        return {'used': used, 'limit': money(spend.get('limit')), 'enabled': bool(spend.get('enabled')),
+                'currency': str(spend['used'].get('currency') or 'USD')}
+    extra = data.get('extra_usage')
+    if isinstance(extra, dict) and 'is_enabled' in extra:
+        places = int(extra.get('decimal_places') or 0)
+        def amount(value):
+            try:
+                return float(value) / 10 ** places if value is not None else None
+            except (TypeError, ValueError):
+                return None
+        return {'used': amount(extra.get('used_credits')) or 0.0, 'limit': amount(extra.get('monthly_limit')),
+                'enabled': bool(extra.get('is_enabled')), 'currency': str(extra.get('currency') or 'USD')}
+    return None
+
+
+# ---------------------------------------------------------------- Claude Code's cost at API prices
+
+# Anthropic's API prices per million tokens: (input, output, cache read). Cache writes cost 1.25x the
+# input price for the 5-minute cache and 2x for the 1-hour one. Longest model id prefix first.
+CLAUDE_PRICES = (
+    ('claude-fable-5-2', (8.0, 40.0, 0.20)), ('claude-mythos-5-2', (8.0, 40.0, 0.20)),
+    ('claude-fable-5-1', (10.0, 50.0, 0.25)), ('claude-mythos-5-1', (10.0, 50.0, 0.25)),
+    ('claude-fable-5', (10.0, 50.0, 1.0)), ('claude-mythos-5', (10.0, 50.0, 1.0)),
+    ('claude-opus-5-5', (4.0, 20.0, 0.20)), ('claude-opus-5', (5.0, 25.0, 0.50)),
+    ('claude-opus-4-8', (5.0, 25.0, 0.50)), ('claude-opus-4-7', (5.0, 25.0, 0.50)),
+    ('claude-opus-4-6', (5.0, 25.0, 0.50)), ('claude-opus-4-5', (5.0, 25.0, 0.50)),
+    ('claude-opus-4', (15.0, 75.0, 1.50)),
+    ('claude-sonnet-5-5', (2.0, 10.0, 0.10)), ('claude-sonnet-5', (2.0, 10.0, 0.20)),
+    ('claude-sonnet-4', (3.0, 15.0, 0.30)),
+    ('claude-haiku-5-5', (0.10, 0.50, 0.01)), ('claude-haiku-4-5', (1.0, 5.0, 0.10)),
+)
+HAIKU_LONG = 100_000      # Claude Haiku 5.5: prompts past this many tokens cost 5x ($0.50 / $2.50)
+COST_KEEP = 8 * 86400     # s of replies kept: a weekly window and a day to spare
+WINDOW_SPAN = {'session': 5 * 3600, 'weekly': 7 * 86400, 'sonnet': 7 * 86400, 'opus': 7 * 86400}
+
+
+def claude_reply_cost(model: str, usage: dict) -> float | None:
+    """What one reply would cost at the API's prices, in dollars; None for a model without a price."""
+    model = (model or '').lower()
+    price = next((p for prefix, p in CLAUDE_PRICES if model.startswith(prefix)), None)
+    if price is None or not isinstance(usage, dict):
+        return None
+    def n(value):
+        try:
+            return max(0.0, float(value or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    plain, out, read = n(usage.get('input_tokens')), n(usage.get('output_tokens')), n(usage.get('cache_read_input_tokens'))
+    split = usage.get('cache_creation') if isinstance(usage.get('cache_creation'), dict) else {}
+    short, long_ = n(split.get('ephemeral_5m_input_tokens')), n(split.get('ephemeral_1h_input_tokens'))
+    if not short and not long_:
+        short = n(usage.get('cache_creation_input_tokens'))
+    p_in, p_out, p_read = price
+    scale = 2.0 if usage.get('speed') == 'fast' else 1.0                 # fast mode: twice the price
+    if model.startswith('claude-haiku-5-5') and plain + read + short + long_ > HAIKU_LONG:
+        scale *= 5.0
+    return scale * (plain * p_in + short * p_in * 1.25 + long_ * p_in * 2.0 + read * p_read + out * p_out) / 1e6
+
+
+class ClaudeCosts:
+    """Claude Code's replies on this PC from its transcripts (~/.claude/projects), each priced at the
+    API's rates: what the Claude plan's use would have cost through the API. A first look reads the
+    last COST_KEEP's files (seconds, on the poller's thread); later looks read only what was added.
+    A reply is written several times as it streams, so the last line of each message id counts."""
+
+    def __init__(self, projects: Path):
+        self.projects = projects
+        self.read_to: dict[str, tuple[int, float]] = {}     # path: (bytes read, mtime then)
+        self.replies: dict[str, tuple[float, float]] = {}   # message id: (time, dollars)
+        self.lock = threading.Lock()
+
+    def look(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        oldest = now - COST_KEEP
+        try:
+            paths = list(self.projects.rglob('*.jsonl'))
+        except OSError:
+            return
+        for path in paths:
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime < oldest:
+                continue
+            key = str(path)
+            start, seen = self.read_to.get(key, (0, 0.0))
+            if stat.st_size < start:
+                start = 0                                     # rewritten: read again
+            if stat.st_size == start and stat.st_mtime == seen:
+                continue
+            try:
+                with open(path, 'rb') as handle:
+                    handle.seek(start)
+                    chunk = handle.read()
+            except OSError:
+                continue
+            end = chunk.rfind(b'\n') + 1                      # whole lines only; the rest next time
+            for line in chunk[:end].splitlines():
+                if b'"usage"' not in line or b'"assistant"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get('message')
+                if entry.get('type') != 'assistant' or not isinstance(message, dict) or not message.get('id'):
+                    continue
+                cost = claude_reply_cost(message.get('model'), message.get('usage'))
+                at = parse_time(entry.get('timestamp'))
+                if cost is not None and at is not None and at >= oldest:
+                    self.replies[message['id']] = (at, cost)
+            self.read_to[key] = (start + end, stat.st_mtime)
+        self.replies = {k: v for k, v in self.replies.items() if v[0] >= oldest}
+
+    def since(self, start: float) -> float:
+        return sum(cost for at, cost in self.replies.values() if at >= start)
+
+    def estimate(self, windows: list[dict], now: float | None = None) -> dict:
+        """The cost of the replies in each plan window, by its key: from its start (its reset less its
+        length) to now."""
+        now = time.time() if now is None else now
+        with self.lock:
+            self.look(now)
+            found = {}
+            for window in windows:
+                span = WINDOW_SPAN.get(window.get('key'))
+                resets = window.get('resets_at')
+                if span is None:
+                    continue
+                start = (resets - span) if resets else now - span
+                found[window['key']] = round(self.since(start), 4)
+            return found
+
+
+_claude_costs: dict[str, ClaudeCosts] = {}
+
+
+def claude_costs(home: Path | None = None) -> ClaudeCosts:
+    folder_ = claude_credentials_path(home).parent / 'projects'
+    key = str(folder_)
+    if key not in _claude_costs:
+        _claude_costs[key] = ClaudeCosts(folder_)
+    return _claude_costs[key]
+
+
 def _window_from_codex(entry: dict | None, key: str, fallback_label: str, now: float) -> dict | None:
     if not isinstance(entry, dict):
         return None
@@ -914,11 +1078,17 @@ def fetch_claude(home: Path | None = None, opener=_http_json, renew=None) -> dic
     windows = parse_claude_usage(payload)
     if not windows:
         return _empty_state(True, 'No active plan window reported by Claude.')
+    try:
+        estimate = claude_costs(home).estimate(windows)
+    except Exception:                                         # a figure on the card, never a failed reading
+        estimate = {}
     return {
         'connected': True,
         'signed_in': True,
         'plan': plan,
         'windows': windows,
+        'spend': parse_claude_spend(payload),
+        'estimate': estimate,
         'updated_at': time.time(),
         'error': '',
     }
