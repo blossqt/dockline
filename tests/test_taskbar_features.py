@@ -796,6 +796,75 @@ class DockTests(Temp):
             dock.testing = True
         dock.hide()
 
+    def test_previews_act_as_the_taskbars(self):
+        """The close button turns red under the pointer and closes only on a release over it; a click
+        counts only where it was pressed; the middle button closes; the right one opens the window's
+        own menu, its items greyed as its state says."""
+        from unittest import mock
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from dockline import previews
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe'),
+                                       win.Window(102, 'Two', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        tile = self.apps(dock)
+        tile.refresh()
+        panel = previews.Previews(tile)
+        panel.show_for(0)
+        closed, shown, menus = [], [], []
+
+        def mouse(kind, pos, button=Qt.LeftButton):
+            buttons = button if kind != QEvent.MouseButtonRelease else Qt.NoButton
+            event = QMouseEvent(kind, QPointF(pos), QPointF(panel.mapToGlobal(pos.toPoint())), button, buttons,
+                                Qt.NoModifier)
+            {QEvent.MouseMove: panel.mouseMoveEvent, QEvent.MouseButtonPress: panel.mousePressEvent,
+             QEvent.MouseButtonRelease: panel.mouseReleaseEvent}[kind](event)
+
+        close = panel.close_box(1).center()
+        thumb = QPointF(panel.box(0).center())
+        with mock.patch.object(win, 'close', closed.append), \
+                mock.patch.object(win, 'activate', shown.append), \
+                mock.patch.object(win, 'window_commands', lambda hwnd: [('Restore', win.SC_RESTORE, False),
+                                                                       ('Close', win.SC_CLOSE, True)]), \
+                mock.patch.object(dock, 'show_menu', lambda menu, where: menus.append(
+                    [(a.text(), a.isEnabled()) for a in menu.actions() if a.text()])), \
+                mock.patch.object(previews, 'peek', lambda *a, **k: None):
+            mouse(QEvent.MouseMove, close)
+            self.assertTrue(panel.on_close)                                   # red under the pointer
+            panel.grab()                                                      # and drawn so
+            mouse(QEvent.MouseButtonPress, close)
+            mouse(QEvent.MouseMove, thumb)
+            mouse(QEvent.MouseButtonRelease, thumb)                           # let go elsewhere: nothing
+            self.assertEqual((closed, shown), ([], []))
+            self.assertFalse(panel.on_close)
+            mouse(QEvent.MouseMove, close)
+            mouse(QEvent.MouseButtonPress, close)
+            mouse(QEvent.MouseButtonRelease, close)
+            self.assertEqual(closed, [102])
+            mouse(QEvent.MouseButtonPress, thumb, Qt.MiddleButton)
+            mouse(QEvent.MouseButtonRelease, thumb, Qt.MiddleButton)
+            self.assertEqual(closed, [102, 101])
+            mouse(QEvent.MouseButtonPress, thumb, Qt.RightButton)
+            mouse(QEvent.MouseButtonRelease, thumb, Qt.RightButton)
+            self.assertEqual(menus, [[('Restore', False), ('Close', True)]])
+            mouse(QEvent.MouseButtonPress, thumb)
+            mouse(QEvent.MouseButtonRelease, thumb)
+            self.assertEqual(shown, [101])
+        panel.close_now()
+        tile.retire()
+        dock.hide()
+
+    def test_window_menu_follows_the_windows_state(self):
+        from unittest import mock
+        style = win.WS_THICKFRAME | win.WS_MINIMIZEBOX | win.WS_MAXIMIZEBOX
+        with mock.patch.object(win.user32, 'GetWindowLongPtrW', lambda hwnd, which: style), \
+                mock.patch.object(win.user32, 'IsIconic', lambda hwnd: 0), \
+                mock.patch.object(win.user32, 'IsZoomed', lambda hwnd: 1):
+            items = {name: allowed for name, _, allowed in win.window_commands(5)}
+        self.assertEqual(items, {'Restore': True, 'Move': False, 'Size': False, 'Minimize': True,
+                                 'Maximize': False, 'Close': True})
+
     def test_frosted_band_leaves_out_the_magnified_icons(self):
         from PySide6.QtCore import QRect
         from dockline import look as L

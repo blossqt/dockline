@@ -19,7 +19,7 @@ import ctypes
 from ctypes import wintypes
 
 from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from . import look as L
@@ -168,6 +168,9 @@ BOX_W, BOX_H, TITLE_H, PAD, GAP = 216, 150, 28, 10, 8
 MOST = 6
 ABOVE = 8               # between the dock and the panel, as the taskbar's (the icons shrink back meanwhile)
 PEEK_AFTER = 400        # ms resting on a preview before its window is shown alone
+ICON = 16               # a window's icon beside its title
+CLOSE_RED = QColor(196, 43, 28)        # Windows 11's close button under the pointer (#C42B1C)
+CLOSE_PRESSED = QColor(163, 38, 24)    # and pressed
 
 
 class Previews(QWidget):
@@ -186,6 +189,9 @@ class Previews(QWidget):
         self.windows: list[win.Window] = []
         self.thumbs: list[ctypes.c_void_p] = []
         self.hover = -1
+        self.on_close = False                     # the pointer on the hovered preview's close button
+        self.pressed = None                       # (index, 'thumb' or 'close', button) while held
+        self.icons: dict = {}                     # each window's icon, beside its title
         self.hide_soon = QTimer(self)
         self.hide_soon.setSingleShot(True)
         self.hide_soon.setInterval(350)
@@ -216,6 +222,7 @@ class Previews(QWidget):
         self.drop_thumbs()
         self.index = index
         self.windows = windows
+        self.icons = {w.hwnd: self.icons[w.hwnd] for w in windows if w.hwnd in self.icons}
         count = len(windows)
         width = PAD * 2 + count * BOX_W + (count - 1) * GAP
         height = PAD * 2 + BOX_H
@@ -408,14 +415,29 @@ class Previews(QWidget):
         try:
             for i, window in enumerate(self.windows):
                 box = QRectF(self.box(i))
-                if i == self.hover:
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QColor(255, 255, 255, 22) if dark else QColor(0, 0, 0, 16))
+                pressed = self.pressed is not None and self.pressed[0] == i
+                if i == self.hover:                              # as the taskbar's: lit under the pointer,
+                    painter.setPen(Qt.NoPen)                     # a touch more while pressed
+                    strength = 34 if pressed and self.pressed[1] == 'thumb' else 22
+                    painter.setBrush(QColor(255, 255, 255, strength) if dark else QColor(0, 0, 0, strength - 6))
                     painter.drawRoundedRect(box, 8, 8)
-                L.text(painter, QRectF(box.x() + 8, box.y() + 4, box.width() - 38, TITLE_H - 6), window.title,
+                icon = self.window_icon(window)
+                title_x = box.x() + 8
+                if icon is not None:
+                    painter.drawPixmap(QRectF(title_x, box.y() + (TITLE_H - ICON) / 2, ICON, ICON), icon,
+                                       QRectF(icon.rect()))
+                    title_x += ICON + 8
+                L.text(painter, QRectF(title_x, box.y() + 4, box.right() - 38 - title_x, TITLE_H - 6), window.title,
                        text, 12.5, 600, Qt.AlignLeft | Qt.AlignVCenter)
                 if i == self.hover:
-                    L.glyph(painter, self.close_box(i), '', text, 12)
+                    close = self.close_box(i)
+                    if self.on_close:                            # Windows' close red, the cross white on it
+                        painter.setPen(Qt.NoPen)
+                        painter.setBrush(CLOSE_PRESSED if pressed and self.pressed[1] == 'close' else CLOSE_RED)
+                        painter.drawRoundedRect(close, 4, 4)
+                        L.glyph(painter, close, '\ue711', QColor(255, 255, 255), 12)
+                    else:
+                        L.glyph(painter, close, '\ue711', text, 12)
                 if i < len(self.thumbs) and not self.thumbs[i]:
                     L.text(painter, box.adjusted(0, TITLE_H, 0, 0), 'No preview', QColor(140, 140, 150), 12)
         finally:
@@ -430,6 +452,20 @@ class Previews(QWidget):
         box = self.box(i)
         return QRectF(box.right() - 30, box.top() + 3, 26, TITLE_H - 6)
 
+    def window_icon(self, window) -> QPixmap | None:
+        """The window's own icon, as the taskbar's previews show beside each title; else its app's."""
+        if window.hwnd not in self.icons:
+            pixmap = None
+            handle = win.window_icon(window.hwnd)
+            if handle:
+                image = QImage.fromHICON(handle)
+                if not image.isNull():
+                    pixmap = QPixmap.fromImage(image)
+            if pixmap is None and 0 <= self.index < len(self.strip.groups):
+                pixmap = self.strip.icon_for(self.strip.groups[self.index])
+            self.icons[window.hwnd] = pixmap
+        return self.icons[window.hwnd]
+
     # -- the pointer
     def index_at(self, pos) -> int:
         for i in range(len(self.windows)):
@@ -442,12 +478,18 @@ class Previews(QWidget):
 
     def leaveEvent(self, _):
         self.hover = -1
+        self.on_close = False
         self.end_peek()
         self.update()
         self.leave_soon()
 
     def mouseMoveEvent(self, event):
-        index = self.index_at(event.position().toPoint())
+        pos = event.position()
+        index = self.index_at(pos.toPoint())
+        on_close = index >= 0 and self.close_box(index).contains(pos)
+        if on_close != self.on_close:
+            self.on_close = on_close
+            self.update()
         if index != self.hover:
             self.hover = index
             self.update()
@@ -462,19 +504,56 @@ class Previews(QWidget):
                 if index >= 0:
                     self.peek_soon.start()
 
-    def mouseReleaseEvent(self, event):
-        pos = event.position()
+    def part_at(self, pos) -> tuple[int, str]:
         index = self.index_at(pos.toPoint())
-        if index < 0:
+        return index, ('close' if index >= 0 and self.close_box(index).contains(pos) else 'thumb')
+
+    def mousePressEvent(self, event):
+        index, part = self.part_at(event.position())
+        self.pressed = (index, part, event.button()) if index >= 0 else None
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        """As the taskbar's previews: a click counts only where it was pressed (off the close button
+        before letting go, nothing closes); the middle button closes, the right one opens the window's
+        own menu."""
+        pressed, self.pressed = self.pressed, None
+        self.update()
+        index, part = self.part_at(event.position())
+        if index < 0 or pressed is None or pressed[:3] != (index, part, event.button()):
             return
         window = self.windows[index]
-        if event.button() == Qt.MiddleButton or self.close_box(index).contains(pos):
-            self.end_peek()
-            win.close(window.hwnd)                           # as the taskbar's preview does
-            QTimer.singleShot(250, self.strip.refresh)
-            QTimer.singleShot(300, lambda: self.show_for(self.index) if self.isVisible() else None)
-            return
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and part == 'close'):
+            self.close_window(window.hwnd)
+        elif event.button() == Qt.LeftButton:
             self.close_now()
             win.activate(window.hwnd)
             QTimer.singleShot(150, self.strip.refresh)
+        elif event.button() == Qt.RightButton:
+            self.window_menu(window.hwnd, event.globalPosition().toPoint())
+
+    def close_window(self, hwnd: int) -> None:
+        self.end_peek()
+        win.close(hwnd)                                      # as the taskbar's preview does
+        QTimer.singleShot(250, self.strip.refresh)
+        QTimer.singleShot(300, lambda: self.show_for(self.index) if self.isVisible() else None)
+
+    def window_menu(self, hwnd: int, where: QPoint) -> None:
+        """The window's own menu (its title bar's), as a right-click on the taskbar's preview opens."""
+        self.end_peek()
+        self.hide_soon.stop()
+        dock = self.strip.dock
+        menu = dock.new_menu()
+        for name, command, allowed in win.window_commands(hwnd):
+            if command == win.SC_CLOSE:
+                menu.addSeparator()
+            action = menu.addAction(name)
+            action.setEnabled(allowed)
+            if command == win.SC_CLOSE:
+                action.triggered.connect(lambda _=False, h=hwnd: self.close_window(h))
+            else:
+                action.triggered.connect(lambda _=False, h=hwnd, c=command: (self.close_now(), win.window_command(h, c)))
+        dock.show_menu(menu, where)
+        menu.deleteLater()
+        if not self.underMouse():
+            self.leave_soon()

@@ -394,6 +394,32 @@ def close(hwnd) -> None:
     user32.PostMessageW(hwnd, 0x10, 0, 0)        # WM_CLOSE
 
 
+SC_SIZE, SC_MOVE, SC_MINIMIZE, SC_MAXIMIZE, SC_CLOSE, SC_RESTORE = 0xF000, 0xF010, 0xF020, 0xF030, 0xF060, 0xF120
+WS_THICKFRAME, WS_MINIMIZEBOX, WS_MAXIMIZEBOX = 0x40000, 0x20000, 0x10000
+
+
+def window_commands(hwnd) -> list[tuple[str, int, bool]]:
+    """A window's own menu (its title bar's, as the taskbar's previews show it on a right-click): each
+    item's name, its command (WM_SYSCOMMAND) and whether the window's state allows it now. Restore,
+    Move and Size are greyed while it is as it was; Minimize and Maximize follow its title-bar buttons."""
+    style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
+    iconic, zoomed = bool(user32.IsIconic(hwnd)), bool(user32.IsZoomed(hwnd))
+    normal = not iconic and not zoomed
+    return [('Restore', SC_RESTORE, not normal), ('Move', SC_MOVE, normal),
+            ('Size', SC_SIZE, normal and bool(style & WS_THICKFRAME)),
+            ('Minimize', SC_MINIMIZE, not iconic and bool(style & WS_MINIMIZEBOX)),
+            ('Maximize', SC_MAXIMIZE, not zoomed and bool(style & WS_MAXIMIZEBOX)),
+            ('Close', SC_CLOSE, True)]
+
+
+def window_command(hwnd, command: int) -> None:
+    """Carry out an item of a window's own menu, as choosing it there does. Move and Size work with the
+    keyboard on the window, so it comes to the front first; Minimize and Close need no focus."""
+    if command in (SC_MOVE, SC_SIZE, SC_RESTORE, SC_MAXIMIZE):
+        activate(hwnd)
+    user32.PostMessageW(hwnd, 0x0112, command, 0)    # WM_SYSCOMMAND
+
+
 def no_activate(hwnd) -> None:
     ex = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
     user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)

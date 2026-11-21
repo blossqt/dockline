@@ -976,7 +976,8 @@ class Dock(QWidget):
 
     # ------------------------------------------------------------ menus and windows
 
-    def context_menu(self, tile, where: QPoint, local: QPoint) -> None:
+    def new_menu(self) -> GlassMenu:
+        """A menu in the dock's style (its frosted glass in the Glass style)."""
         glass = self.look.glass and not self.testing
         menu = GlassMenu(self, glass, self.panel_fill() if glass else None, self.look.dark)
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
@@ -985,6 +986,10 @@ class Dock(QWidget):
         menu.setStyleSheet(menu_css(self.look, QColor(0, 0, 0, 0) if glass else None))
         if glass:
             win.round_corners(int(menu.winId()), False)  # its own corners, round its frosted pane
+        return menu
+
+    def context_menu(self, tile, where: QPoint, local: QPoint) -> None:
+        menu = self.new_menu()
         if tile is not None and getattr(tile, 'owns_menu', None) and tile.owns_menu(local):
             tile.menu(menu, local)                       # an app's own menu, nothing of the dock's
             self.show_menu(menu, where)
