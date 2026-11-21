@@ -232,9 +232,9 @@ def app_icon() -> QIcon:
 
 # ---------------------------------------------------------------- style sheets
 
-READ_DARK = 52          # dark styles: under the tint, what is behind is at most this light (white text)
-READ_LIGHT = 205        # light styles: at least this light (dark text)
-READ_MOST = 0.93        # the tint never quite hides what is behind
+READ_DARK = 95          # dark styles: under the tint, what is behind is at most this light (white text)
+READ_LIGHT = 150        # light styles: at least this light (dark text)
+READ_MOST = 0.82        # the tint never quite hides what is behind
 TINT_CELL = 12          # px of a pane to a spot of its readable tint
 
 
