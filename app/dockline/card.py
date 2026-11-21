@@ -58,12 +58,23 @@ class Card(QWidget):
             return
         if self.look.glass:                  # the dock's clear glass, over the screen behind blurred
             pane = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            fill = self.tile.dock.panel_fill()
             L.paint_backdrop(painter, pane, GLASS_RADIUS, self.backdrop)
-            L.paint_clear_glass(painter, pane, GLASS_RADIUS, self.tile.dock.panel_fill(), self.look.dark)
+            L.paint_clear_glass(painter, pane, GLASS_RADIUS, fill, self.look.dark, self.tint(fill))
             return
         painter.setPen(QPen(self.look.c(self.look.edge), 1))
         painter.setBrush(self.look.c(self.look.panel))
         painter.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), RADIUS, RADIUS)
+
+    def tint(self, fill):
+        """Its readable tint over what is behind it (look.readable_tint), made once a backdrop."""
+        if self.backdrop is None:
+            return None
+        key = (self.backdrop.cacheKey(), fill.rgba(), self.look.dark)
+        if getattr(self, '_tint_key', None) != key:
+            self._tint = L.readable_tint(self.backdrop, fill, self.look.dark)
+            self._tint_key = key
+        return self._tint
 
     def _desired_height(self) -> int:
         inner_w = max(1, self.width() - 2 * PAD)
@@ -102,6 +113,7 @@ class Card(QWidget):
             self._placing = False
         if self.look.glass:
             win.round_corners(int(self.winId()), False)  # its own corners, drawn round its frosted pane
+        dock.clear_shell_before(self.geometry())         # Start or Search over it: closed first
         self.show()
         self.activateWindow()
         win.activate(int(self.winId()))

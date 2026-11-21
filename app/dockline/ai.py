@@ -383,6 +383,25 @@ CLAUDE_LOCK_STALE = 60.0   # s: Claude Code's refresh locks are stale after a mi
 _claude_renewal = {'at': -1e9, 'mtime': -1.0}
 
 
+CLAUDE_CLI_KNOWN = '2.1.325'    # Claude Code's version when this was written, if none is installed
+
+
+def _claude_cli_agent() -> str:
+    """Claude Code's own User-Agent, as its CLI sends it to the sign-in server: that server answers
+    any other with 429 Too Many Requests (Dockline's 'claude-code/2.1.0' never renewed a sign-in).
+    The version is the newest installed (~/.local/share/claude/versions)."""
+    found = []
+    try:
+        for entry in (Path.home() / '.local' / 'share' / 'claude' / 'versions').iterdir():
+            parts = entry.name.split('.')
+            if len(parts) == 3 and all(p.isdigit() for p in parts):
+                found.append(tuple(int(p) for p in parts))
+    except OSError:
+        pass
+    version = '.'.join(map(str, max(found))) if found else CLAUDE_CLI_KNOWN
+    return f'claude-cli/{version} (external, cli)'
+
+
 def _claude_locks(path: Path) -> list[Path]:
     """The locks Claude Code holds while it renews its sign-in (proper-lockfile directories): one in its
     folder, and the older one beside the folder."""
@@ -462,7 +481,7 @@ def _refresh_claude_cli_token(path: Path | None = None, post=None) -> bool:
             body['scope'] = ' '.join(str(s) for s in oauth['scopes'])
         try:
             answer = post(CLAUDE_TOKEN_URL, method='POST', body=body, timeout=15,
-                          headers={'User-Agent': 'claude-code/2.1.0'})
+                          headers={'User-Agent': _claude_cli_agent()})
         except Exception:
             return False
         token = answer.get('access_token') if isinstance(answer, dict) else None

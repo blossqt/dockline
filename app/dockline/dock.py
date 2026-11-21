@@ -9,7 +9,7 @@ import time
 import winreg
 from ctypes import wintypes
 
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer
+from PySide6.QtCore import QEventLoop, QPoint, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QBrush, QColor, QCursor, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QHBoxLayout, QMenu, QWidget
 
@@ -28,6 +28,8 @@ RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ALERT_HOLD = 1.2      # s an alert keeps a hidden dock out, once it is in
 ALERT_SLIDE = 0.22    # s the dock takes to come in
 NOTICE_GAP = 60.0     # s: at most one notification brings the dock out in this time
+SHELL_GONE_MOST = 0.4  # s waited at most for Start or Search to close before a card or menu opens
+SHELL_FADE_MS = 120   # and then for its closing fade
 WM_QUERYENDSESSION, WM_DISPLAYCHANGE = 0x11, 0x7E
 
 
@@ -70,21 +72,29 @@ class GlassMenu(QMenu):
 
     RADIUS = 10
 
-    def __init__(self, parent, glass: bool):
+    def __init__(self, parent, glass: bool, fill=None, dark: bool = True):
         super().__init__(parent)
         self.glass = glass
+        self.fill = fill                                 # its tint, drawn here (readable_tint), not by its style
+        self.dark = dark
         self.backdrop = None
+        self.tint = None
 
     def showEvent(self, event):
         if self.glass:                                   # before it is on screen: never in its own picture
             self.backdrop = L.frosted_behind(self.geometry())
+            if self.fill is not None:
+                self.tint = L.readable_tint(self.backdrop, self.fill, self.dark)
         super().showEvent(event)
 
     def paintEvent(self, event):
         if self.glass and self.backdrop is not None:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            L.paint_backdrop(painter, QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.backdrop)
+            pane = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+            L.paint_backdrop(painter, pane, self.RADIUS, self.backdrop)
+            if self.fill is not None:
+                L.paint_clear_glass(painter, pane, self.RADIUS, self.fill, self.dark, self.tint)
             painter.end()
         super().paintEvent(event)
 
@@ -968,15 +978,16 @@ class Dock(QWidget):
 
     def context_menu(self, tile, where: QPoint, local: QPoint) -> None:
         glass = self.look.glass and not self.testing
-        menu = GlassMenu(self, glass)                    # the dock's glass, over the screen behind blurred
+        menu = GlassMenu(self, glass, self.panel_fill() if glass else None, self.look.dark)
         menu.setWindowFlags(menu.windowFlags() | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         menu.setAttribute(Qt.WA_TranslucentBackground)
-        menu.setStyleSheet(menu_css(self.look, self.panel_fill() if glass else None))
+        # on glass its tint is drawn by the menu (readable over what is behind), so its style has none
+        menu.setStyleSheet(menu_css(self.look, QColor(0, 0, 0, 0) if glass else None))
         if glass:
             win.round_corners(int(menu.winId()), False)  # its own corners, round its frosted pane
         if tile is not None and getattr(tile, 'owns_menu', None) and tile.owns_menu(local):
             tile.menu(menu, local)                       # an app's own menu, nothing of the dock's
-            menu.exec(where)
+            self.show_menu(menu, where)
             menu.deleteLater()                           # one menu a right-click: not kept on the dock
             return
         if tile is not None:
@@ -996,8 +1007,31 @@ class Dock(QWidget):
                        lambda: self.set_hide_taskbar(not self.cfg['hide_taskbar']))
         menu.addSeparator()
         menu.addAction('Quit Dockline', QApplication.instance().quit)
-        menu.exec(where)
+        self.show_menu(menu, where)
         menu.deleteLater()
+
+    def show_menu(self, menu, where: QPoint) -> None:
+        size = menu.sizeHint()
+        self.clear_shell_before(QRect(where.x() - size.width(), where.y() - size.height(),
+                                      2 * size.width(), 2 * size.height()))
+        menu.exec(where)
+
+    def clear_shell_before(self, rect: QRect) -> None:
+        """Start or Search is in front over where a card or menu is about to open (Windows keeps them
+        above every always-on-top window, so nothing of the dock's can show over them): closed first,
+        as the previews close them, and waited for, so the card's frosted glass never holds them."""
+        if self.testing:
+            return
+        front = win.shell_covering((rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1))
+        if not win.dismiss_shell(front):
+            return
+        loop = QEventLoop()
+        until = time.monotonic() + SHELL_GONE_MOST
+        while time.monotonic() < until and win.foreground() == front:
+            QTimer.singleShot(20, loop.quit)
+            loop.exec()
+        QTimer.singleShot(SHELL_FADE_MS, loop.quit)      # and its closing fade is over
+        loop.exec()
 
     def set_hide_taskbar(self, on: bool) -> None:
         self.cfg['hide_taskbar'] = on

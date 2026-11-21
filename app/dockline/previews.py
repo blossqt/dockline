@@ -389,7 +389,14 @@ class Previews(QWidget):
             painter.drawPixmap(QRectF(self.rect()), self.band,
                                QRectF(here.x() * ratio, here.y() * ratio, self.width() * ratio, self.height() * ratio))
             pane = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-            L.paint_clear_glass(painter, pane, self.RADIUS, self.strip.dock.panel_fill(), dark)
+            fill = self.strip.dock.panel_fill()
+            key = (self.band.cacheKey(), fill.rgba(), dark)
+            if getattr(self, '_tint_key', None) != key:          # the band's readable tint, once a band
+                self._tint = L.readable_tint(self.band, fill, dark)
+                self._tint_key = key
+            cell = L.TINT_CELL                                   # its spots under this panel, where it is now
+            part = QRectF(here.x() / cell, here.y() / cell, self.width() / cell, self.height() / cell)
+            L.paint_clear_glass(painter, pane, self.RADIUS, fill, dark, self._tint, part)
             text = look.c(look.text)
         else:
             painter.fillRect(self.rect(), QColor(32, 32, 38) if dark else QColor(246, 246, 248))

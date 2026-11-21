@@ -232,13 +232,66 @@ def app_icon() -> QIcon:
 
 # ---------------------------------------------------------------- style sheets
 
-def paint_clear_glass(painter: QPainter, rect: QRectF, radius: float, fill: QColor, dark: bool) -> None:
-    """The Glass style's pane, for everything that opens from the dock: the suite's frosted glass - an
-    even tint over what is behind, blurred (paint_backdrop), and a hairline round its edge, as the
-    suite's pop-ups have (suitetheme._paint_frosted). No rim of light."""
+READ_DARK = 52          # dark styles: under the tint, what is behind is at most this light (white text)
+READ_LIGHT = 205        # light styles: at least this light (dark text)
+READ_MOST = 0.93        # the tint never quite hides what is behind
+TINT_CELL = 12          # px of a pane to a spot of its readable tint
+
+
+def readable_tint(backdrop, fill: QColor, dark: bool) -> QPixmap | None:
+    """The tint for a pane over a frosted backdrop (frosted_behind), spot by spot: as clear as the
+    glass is set where what is behind is dark enough (or, in a light style, light enough) to read the
+    pane's text over, and as much stronger as it needs to be where it is not - a page of white
+    behind a dark card. Each spot also takes its neighbours' need, so text at the edge of a bright
+    patch is covered too. Drawn scaled up smoothly, it shades from one to the next."""
+    if backdrop is None or backdrop.isNull():
+        return None
+    from PySide6.QtGui import QImage
+    ratio = backdrop.devicePixelRatio() or 1.0
+    cols = max(1, round(backdrop.width() / ratio / TINT_CELL))
+    rows = max(1, round(backdrop.height() / ratio / TINT_CELL))
+    image = backdrop.toImage().scaled(cols, rows, Qt.IgnoreAspectRatio, Qt.SmoothTransformation) \
+        .convertToFormat(QImage.Format_RGB32)
+    raw, line = image.constBits(), image.bytesPerLine()
+    base = fill.alphaF()
+    shade = fill.red()                                   # the tint is black or white
+    need = []
+    for y in range(rows):
+        row = []
+        for x in range(cols):
+            i = y * line + 4 * x
+            lum = 0.0722 * raw[i] + 0.7152 * raw[i + 1] + 0.2126 * raw[i + 2]
+            if dark:
+                wanted = 1 - READ_DARK / lum if lum > READ_DARK else 0.0
+            else:
+                wanted = (READ_LIGHT - lum) / max(1.0, 255 - lum) if lum < READ_LIGHT else 0.0
+            row.append(min(READ_MOST, max(base, wanted)))
+        need.append(row)
+    tint = QImage(cols, rows, QImage.Format_ARGB32)
+    for y in range(rows):
+        for x in range(cols):
+            near = max(need[j][i] for j in range(max(0, y - 1), min(rows, y + 2))
+                       for i in range(max(0, x - 1), min(cols, x + 2)))
+            tint.setPixelColor(x, y, QColor(shade, shade, shade, round(near * 255)))
+    return QPixmap.fromImage(tint)
+
+
+def paint_clear_glass(painter: QPainter, rect: QRectF, radius: float, fill: QColor, dark: bool,
+                      tint=None, tint_from: QRectF | None = None) -> None:
+    """The Glass style's pane, for everything that opens from the dock: the suite's frosted glass - a
+    tint over what is behind, blurred (paint_backdrop), and a hairline round its edge, as the suite's
+    pop-ups have (suitetheme._paint_frosted). No rim of light. With a readable_tint, the tint is that
+    one (its part tint_from, in the tint's own spots, for a pane over part of a band), not even."""
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
-    painter.fillPath(path, fill)
+    if tint is not None and not tint.isNull():
+        painter.save()
+        painter.setClipPath(path)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform)
+        painter.drawPixmap(rect, tint, tint_from if tint_from is not None else QRectF(tint.rect()))
+        painter.restore()
+    else:
+        painter.fillPath(path, fill)
     painter.setBrush(Qt.NoBrush)
     painter.setPen(QPen(QColor(255, 255, 255, 26) if dark else QColor(0, 0, 0, 22), 1))
     painter.drawPath(path)

@@ -546,6 +546,53 @@ class DockTests(Temp):
         strip.retire()
         dock.hide()
 
+    def test_glass_tint_keeps_text_readable_where_the_backdrop_is_bright(self):
+        """A dark card half over a white page: the tint over the page is strong enough for white text,
+        and over the dark half stays as clear as the glass is set. A light card does the opposite."""
+        from PySide6.QtGui import QColor, QImage, QPixmap
+        from dockline import look as L
+        image = QImage(240, 240, QImage.Format_RGB32)
+        image.fill(QColor(20, 20, 24))
+        for y in range(120, 240):
+            for x in range(240):
+                image.setPixelColor(x, y, QColor(250, 250, 250))
+        backdrop = QPixmap.fromImage(image)
+        fill = QColor(0, 0, 0, 89)
+        tint = L.readable_tint(backdrop, fill, dark=True).toImage()
+        top, bottom = tint.pixelColor(10, 1).alpha(), tint.pixelColor(10, tint.height() - 1).alpha()
+        self.assertEqual(top, 89)                                        # dark behind: as set
+        under = 250 * (1 - bottom / 255)
+        self.assertLessEqual(under, L.READ_DARK + 2)                     # white behind: dark enough to read
+        light = L.readable_tint(backdrop, QColor(255, 255, 255, 80), dark=False).toImage()
+        self.assertEqual(light.pixelColor(10, light.height() - 1).alpha(), 80)
+        over = 20 + (255 - 20) * light.pixelColor(10, 1).alpha() / 255
+        self.assertGreaterEqual(over, L.READ_LIGHT - 2)
+
+    def test_cards_and_menus_close_start_covering_them_first(self):
+        """Start in front over where a card or menu opens: it is closed first (Esc, only while it is in
+        front), as the previews close it; elsewhere, nothing is pressed."""
+        from unittest import mock
+        from PySide6.QtCore import QRect
+        from dockline import dock as dock_module
+        dock = self.make()
+        dock.testing = False
+        front = [77]
+        pressed = []
+        with mock.patch.object(win, 'foreground', lambda: front[0]), \
+                mock.patch.object(win, 'window_pid', lambda hwnd: 1), \
+                mock.patch.object(win, 'process_path', lambda pid: r'C:\Windows\StartMenuExperienceHost.exe'), \
+                mock.patch.object(win, 'window_rect', lambda hwnd: (0, 300, 700, 1040)), \
+                mock.patch.object(win, 'press', lambda *keys: (pressed.append(keys), front.__setitem__(0, 5))), \
+                mock.patch.object(dock_module, 'SHELL_FADE_MS', 1):
+            try:
+                dock.clear_shell_before(QRect(1200, 600, 300, 400))      # Start is elsewhere
+                self.assertEqual(pressed, [])
+                dock.clear_shell_before(QRect(400, 600, 300, 400))       # Start covers it
+                self.assertEqual(pressed, [(win.VK_ESCAPE,)])
+            finally:
+                dock.testing = True
+        dock.hide()
+
     def test_menu_opens_task_manager(self):
         """The dock's right-click menu has Task Manager, as the Windows taskbar's has."""
         from unittest import mock
@@ -1060,11 +1107,12 @@ class AIUsageTests(Temp):
         raw['claudeAiOauth'].update(refreshToken='r1', scopes=['user:inference', 'user:profile'],
                                     subscriptionType='pro', rateLimitTier='default_claude_ai')
         path.write_text(json.dumps(raw, separators=(',', ':')), 'utf-8')
-        asked = []
+        asked, agents = [], []
         answers = [ai._HttpStatus(400)]
 
         def post(url, method='GET', headers=None, body=None, timeout=8):
             asked.append((url, method, dict(body), [lock.is_dir() for lock in ai._claude_locks(path)]))
+            agents.append(headers['User-Agent'])
             answer = answers.pop(0)
             if isinstance(answer, Exception):
                 raise answer
@@ -1076,6 +1124,8 @@ class AIUsageTests(Temp):
                 'grant_type': 'refresh_token', 'refresh_token': 'r1', 'client_id': ai.CLAUDE_CLIENT_ID,
                 'scope': 'user:inference user:profile'}))
             self.assertEqual(asked[0][3], [True, True])                        # under Claude Code's locks
+            # as Claude Code itself: the sign-in server answers any other client with 429
+            self.assertRegex(agents[0], r'^claude-cli/\d+\.\d+\.\d+ \(external, cli\)$')
             self.assertEqual([lock.exists() for lock in ai._claude_locks(path)], [False, False])
             self.assertFalse(ai._refresh_claude_cli_token(path, post))          # too soon: not asked again
             self.assertEqual(len(asked), 1)

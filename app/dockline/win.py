@@ -212,10 +212,19 @@ def shell_over(hwnd) -> int:
     front = foreground()
     if not front or not hwnd or front == hwnd:
         return 0
+    return shell_covering(window_rect(hwnd))
+
+
+def shell_covering(rect) -> int:
+    """Start, Search or another of Windows' own panels is the foreground window over rect (left, top,
+    right, bottom, on screen): its window, or 0. For a card or menu about to open there."""
+    front = foreground()
+    if not front:
+        return 0
     program = os.path.basename(process_path(window_pid(front))).lower()
     if program not in SHELL_HOSTS and not (program == 'explorer.exe' and _class_name(front) in IMMERSIVE_CLASSES):
         return 0
-    a, b = window_rect(front), window_rect(hwnd)
+    a, b = window_rect(front), rect
     overlaps = max(a[0], b[0]) < min(a[2], b[2]) and max(a[1], b[1]) < min(a[3], b[3])
     return front if overlaps else 0
 
