@@ -55,3 +55,17 @@ def install() -> None:
 
     with_own.with_own = True
     theme._drag_images = with_own
+
+    # A window that says its glass is held (the bar while a card, menu or the previews are open over
+    # it) keeps the picture it has: nothing behind it changed, and a new one, with that window just
+    # above, read as a changed scene - the bar's own place was blended over from around it and its
+    # tint thinned to the calm that made, so the bar went pale each time a card opened.
+    capture = theme._capture_later
+
+    def held_or_capture(window, final: bool) -> bool:
+        held = getattr(window, 'glass_held', None)
+        if held is not None and held():
+            return True
+        return capture(window, final)
+
+    theme._capture_later = held_or_capture

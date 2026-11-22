@@ -622,6 +622,40 @@ class DockTests(Temp):
             theme._drag_images = original
             user32.DestroyWindow(hwnd)
 
+    def test_bar_glass_keeps_its_picture_while_a_card_is_open(self):
+        """A card open just above the bar holds the bar's glass: no new picture of the screen (it would
+        only catch the card, and thin the bar's tint); with the card gone, pictures are taken again."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QWidget
+        from dockline import glassfix, suitetheme as theme
+        dock = self.make()
+        dock.setGeometry(400, 900, 600, 60)
+        dock.show()
+        card = QWidget(None, Qt.FramelessWindowHint | Qt.Tool)
+        card.setGeometry(500, 600, 300, 280)                  # 20 px above the bar
+        far = QWidget(None, Qt.FramelessWindowHint | Qt.Tool)
+        far.setGeometry(1800, 100, 200, 200)
+        taken = []
+        original_capture, original_drag = theme._capture_later, theme._drag_images
+        theme._capture_later = lambda window, final: taken.append(window) or True
+        try:
+            glassfix.install()
+            far.show()
+            self.assertTrue(theme._capture_later(dock, True))
+            self.assertEqual(taken, [dock])                   # a window elsewhere: taken as before
+            card.show()
+            self.assertTrue(dock.glass_held())
+            theme._capture_later(dock, True)
+            self.assertEqual(taken, [dock])                   # held while the card is open
+            card.hide()
+            theme._capture_later(dock, True)
+            self.assertEqual(taken, [dock, dock])
+        finally:
+            theme._capture_later, theme._drag_images = original_capture, original_drag
+            card.close()
+            far.close()
+            dock.hide()
+
     def test_menu_opens_task_manager(self):
         """The dock's right-click menu has Task Manager, as the Windows taskbar's has."""
         from unittest import mock

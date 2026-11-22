@@ -495,6 +495,17 @@ class Dock(QWidget):
                 win._class_name(win.user32.GetForegroundWindow()) == 'Shell_TrayWnd':
             win.press(0x1B)                              # not found: give the keyboard back
 
+    def glass_held(self) -> bool:
+        """Another of Dockline's windows is open over or beside the bar (a card, a menu, the previews,
+        the magnified icons): what is behind the bar has not changed, and a new picture of it would
+        only catch that window, so the bar's glass keeps the one it has (glassfix)."""
+        near = self.frameGeometry().adjusted(-theme._MARGIN_FRAMELESS, -theme._MARGIN_FRAMELESS,
+                                             theme._MARGIN_FRAMELESS, theme._MARGIN_FRAMELESS)
+        for window in QApplication.topLevelWidgets():
+            if window is not self and window.isVisible() and window.frameGeometry().intersects(near):
+                return True
+        return False
+
     def panel_fill(self) -> QColor:
         """Cards and menus: the dock's own tint, a touch more of it for what is read."""
         fill = self.glass_fill()
