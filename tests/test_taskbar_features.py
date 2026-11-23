@@ -684,6 +684,34 @@ class DockTests(Temp):
             theme._apply_glass, theme._capture_later, theme._drag_images = originals
             dock.hide()
 
+    def test_magnified_icons_rest_when_the_pointer_is_elsewhere(self):
+        """Magnified with no word from Qt that the pointer left (a menu held it): the dock's own look at
+        the pointer rests them; a menu or card opening rests them too."""
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        win.app_windows = lambda pid: [win.Window(101, 'One', 7, r'C:\a\one.exe')]
+        dock = self.make()
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        followed = []
+        layer = mock.Mock(want=1.0)
+        strip._magnifier = layer
+        with mock.patch.object(strip, 'follow_pointer', lambda pos: followed.append(pos)):
+            inside = strip.mapToGlobal(QPoint(strip.width() // 2, strip.height() // 2))
+            strip.check_pointer(inside)
+            self.assertEqual(followed, [])                   # over the apps: still magnified
+            strip.check_pointer(inside + QPoint(0, -400))
+            self.assertEqual(followed, [None])               # elsewhere: back to rest
+            layer.want = 0.0
+            strip.check_pointer(inside + QPoint(0, -400))
+            self.assertEqual(followed, [None])               # resting already: nothing to do
+            dock.rest_icons()
+            self.assertEqual(followed, [None, None])
+        strip._magnifier = None
+        strip.retire()
+        dock.hide()
+
     def test_menus_open_above_the_bar(self):
         from unittest import mock
         from PySide6.QtCore import QPoint

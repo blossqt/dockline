@@ -12,7 +12,7 @@ import webbrowser
 import winreg
 from typing import NamedTuple
 
-from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
@@ -1025,6 +1025,17 @@ class AppsTile(Tile):
         if not moving and self.dragged is None and self.landing is None:
             self.settling = False
             self.shown = {}
+
+    def check_pointer(self, where: QPoint) -> None:
+        """The dock's own look at the pointer (every 60 ms): magnified while it is not over the apps,
+        the icons shrink back. Qt's word that it left can miss - a right-click menu holds the pointer -
+        and the grown icons and their name then stayed on screen, the bar hidden and shown again under
+        them."""
+        layer = getattr(self, '_magnifier', None)
+        if layer is None or not layer.want or self.dragged is not None or self.landing is not None:
+            return
+        if not QRect(self.mapToGlobal(QPoint(0, 0)), self.size()).adjusted(-2, -2, 2, 2).contains(where):
+            self.follow_pointer(None)
 
     def follow_pointer(self, pos: QPoint | None) -> None:
         layer = self.magnifier()

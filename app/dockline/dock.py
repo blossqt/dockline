@@ -694,6 +694,10 @@ class Dock(QWidget):
         full-screen game), and away again half a second after the pointer leaves it."""
         if not self.screen_alive():
             return                                   # its display went: Docks moves it within moments
+        if QApplication.activePopupWidget() is None:  # (a menu holds the pointer: it rests as one opens)
+            for tile in self.tiles:
+                if tile.ID == 'apps':
+                    tile.check_pointer(QCursor.pos())
         if not self.autohide():
             self.keep_in_place()
             if self.tucked:
@@ -739,6 +743,7 @@ class Dock(QWidget):
         elif now >= self.away_since:
             self.away_since = None
             self.tucked = True
+            self.rest_icons()
             self.slide(False, lambda: self.tucked and self.hide())
 
     # ------------------------------------------------------------ displays
@@ -1035,6 +1040,13 @@ class Dock(QWidget):
         self.show_menu(menu, where)
         menu.deleteLater()
 
+    def rest_icons(self) -> None:
+        """The magnified icons, and the name over them, shrink back: a menu or card opened from the
+        dock takes the pointer, and they stayed where it was right-clicked, under the card opened next."""
+        for tile in self.tiles:
+            if tile.ID == 'apps':
+                tile.follow_pointer(None)
+
     def show_menu(self, menu, where: QPoint, above: bool = True) -> None:
         """A menu from the dock opens clear of it, 8 px away on the screen's side as the cards do (the
         Windows taskbar's menus open above it), level with the pointer; at the pointer itself when it
@@ -1047,6 +1059,7 @@ class Dock(QWidget):
             y = bar.bottom() + 1 + ABOVE_BAR if self.edge == 'top' else bar.top() - ABOVE_BAR - size.height()
             where = QPoint(x, y)
         self.clear_shell_before(QRect(where, size))
+        self.rest_icons()
         menu.exec(where)
 
     def clear_shell_before(self, rect: QRect) -> None:

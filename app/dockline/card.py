@@ -114,6 +114,7 @@ class Card(QWidget):
         if self.look.glass:
             win.round_corners(int(self.winId()), False)  # its own corners, drawn round its frosted pane
         dock.clear_shell_before(self.geometry())         # Start or Search over it: closed first
+        dock.rest_icons()                                # the magnified icons, back under the card
         self.show()
         self.activateWindow()
         win.activate(int(self.winId()))
