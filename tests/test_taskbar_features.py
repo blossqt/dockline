@@ -656,6 +656,51 @@ class DockTests(Temp):
             far.close()
             dock.hide()
 
+    def test_bar_glass_corners_and_sliding(self):
+        """The bar keeps its own corners after the shared glass asks Windows for its own, and while it
+        slides its glass waits to be pictured once it has settled."""
+        from unittest import mock
+        from dockline import glassfix, suitetheme as theme
+        dock = self.make()
+        dock.own_corners = True
+        set_dwm, accents, taken = [], [], []
+        originals = theme._apply_glass, theme._capture_later, theme._drag_images
+        theme._capture_later = lambda window, final: taken.append(final) or True
+        try:
+            with mock.patch.object(theme, '_dwm', lambda hwnd, attribute, value: set_dwm.append((attribute, value))), \
+                    mock.patch.object(theme, '_accent', lambda hwnd, state, color=0: accents.append(state)), \
+                    mock.patch.object(theme, '_frameless', lambda window: True):
+                glassfix.install()
+                theme._apply_glass(dock)
+            self.assertEqual(set_dwm[-1], (theme._DWMWA_WINDOW_CORNER_PREFERENCE, 1))   # not rounded by Windows
+            self.assertEqual(accents[-1], theme._ACCENT_DISABLED)                      # nor blurred behind
+            dock.sliding = True
+            self.assertFalse(theme._capture_later(dock, False))      # along the slide: none
+            self.assertTrue(theme._capture_later(dock, True))        # settled: one
+            dock.sliding = False
+            theme._capture_later(dock, False)
+            self.assertEqual(taken, [True, False])
+        finally:
+            theme._apply_glass, theme._capture_later, theme._drag_images = originals
+            dock.hide()
+
+    def test_menus_open_above_the_bar(self):
+        from unittest import mock
+        from PySide6.QtCore import QPoint
+        from dockline import dock as dock_module
+        dock = self.make()
+        dock.setGeometry(400, 1000, 700, 52)
+        shown = []
+        menu = dock.new_menu()
+        menu.addAction('Task Manager')
+        with mock.patch.object(dock_module.GlassMenu, 'exec', lambda m, where: shown.append(where)):
+            dock.show_menu(menu, QPoint(600, 1030))
+            dock.show_menu(menu, QPoint(600, 1030), above=False)
+        size = menu.sizeHint()
+        self.assertEqual(shown[0].y(), 1000 - dock_module.ABOVE_BAR - size.height())   # clear of the bar
+        self.assertEqual(shown[1], QPoint(600, 1030))                                  # a preview's: at the pointer
+        dock.hide()
+
     def test_menu_opens_task_manager(self):
         """The dock's right-click menu has Task Manager, as the Windows taskbar's has."""
         from unittest import mock
@@ -861,7 +906,7 @@ class DockTests(Temp):
                 mock.patch.object(win, 'activate', shown.append), \
                 mock.patch.object(win, 'window_commands', lambda hwnd: [('Restore', win.SC_RESTORE, False),
                                                                        ('Close', win.SC_CLOSE, True)]), \
-                mock.patch.object(dock, 'show_menu', lambda menu, where: menus.append(
+                mock.patch.object(dock, 'show_menu', lambda menu, where, above=True: menus.append(
                     [(a.text(), a.isEnabled()) for a in menu.actions() if a.text()])), \
                 mock.patch.object(previews, 'peek', lambda *a, **k: None):
             mouse(QEvent.MouseMove, close)

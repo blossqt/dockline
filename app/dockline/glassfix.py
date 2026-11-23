@@ -66,6 +66,27 @@ def install() -> None:
         held = getattr(window, 'glass_held', None)
         if held is not None and held():
             return True
+        # While it slides (glass_sliding: the bar coming in or going out), no picture along the way -
+        # each was blurred and gauged on the glass's thread, holding Python's lock from the slide's
+        # frames (10-30 ms hitches) - but one once it has settled, as the shared glass takes anyway.
+        sliding = getattr(window, 'glass_sliding', None)
+        if not final and sliding is not None and sliding():
+            return False
         return capture(window, final)
 
     theme._capture_later = held_or_capture
+
+    # A window that draws its own corners (own_corners: the bar, 14 px round with its hairline) keeps
+    # Windows' rounding off. The shared glass asks Windows for its round corners (8 px, with its own
+    # border) on every frameless window as it shows: two shapes, one inside the other, at each of the
+    # bar's ends. Nor Windows' blur behind, which fills the whole rectangle, corners and all.
+    apply = theme._apply_glass
+
+    def apply_keeping_corners(window) -> None:
+        apply(window)
+        if getattr(window, 'own_corners', False):
+            hwnd = int(window.winId())
+            theme._dwm(hwnd, theme._DWMWA_WINDOW_CORNER_PREFERENCE, 1)      # DWMWCP_DONOTROUND
+            theme._accent(hwnd, theme._ACCENT_DISABLED)
+
+    theme._apply_glass = apply_keeping_corners

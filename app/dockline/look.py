@@ -125,7 +125,54 @@ def _halo(painter: QPainter, rect: QRectF, flags, value: str) -> None:
     painter.setPen(pen)
 
 
+DRAWN = {'rain', 'snow', 'storm'}    # weather Windows' icon font has no glyph for: drawn (weather_mark)
+
+
+def weather_mark(painter: QPainter, rect: QRectF, kind: str, color: QColor, pixels: float) -> None:
+    """Rain, snow or a thunderstorm, as the icon font's own line icons are drawn: its cloud, a size
+    smaller and raised, over slanted drops, flakes or a bolt, in a stroke of its weight. (Segoe Fluent
+    Icons has no glyph for them, and each showed as an empty box.)"""
+    centre = rect.center()
+    f = QFont(icon_family())
+    f.setPixelSize(max(1, round(pixels * 0.86)))
+    cloud = QRectF(rect).translated(0, -pixels * 0.17)
+    stroke = max(1.0, pixels * 0.075)
+    marks = QPainterPath()
+    top, foot = centre.y() + pixels * 0.24, centre.y() + pixels * 0.5
+    if kind == 'rain':
+        for dx in (-0.26, 0.0, 0.26):
+            x = centre.x() + dx * pixels
+            marks.moveTo(x + pixels * 0.05, top)
+            marks.lineTo(x - pixels * 0.05, foot)
+    elif kind == 'snow':
+        for dx, dy in ((-0.26, 0.0), (0.0, 0.14), (0.26, 0.0)):
+            spot = QPointF(centre.x() + dx * pixels, top + pixels * 0.08 + dy * pixels)
+            marks.addEllipse(spot, stroke * 0.75, stroke * 0.75)
+    else:                                                      # a bolt
+        x = centre.x()
+        marks.moveTo(x + pixels * 0.06, top - pixels * 0.04)
+        marks.lineTo(x - pixels * 0.08, top + pixels * 0.15)
+        marks.lineTo(x + pixels * 0.07, top + pixels * 0.15)
+        marks.lineTo(x - pixels * 0.06, foot + pixels * 0.02)
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setFont(f)
+    _halo(painter, cloud, Qt.AlignCenter, G['cloud'])
+    painter.setPen(color)
+    painter.drawText(cloud, Qt.AlignCenter, G['cloud'])
+    pen = QPen(color, stroke, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    if HALO is not None:
+        painter.strokePath(marks, QPen(HALO, stroke + 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.strokePath(marks, pen)
+    if kind == 'snow':
+        painter.fillPath(marks, color)
+    painter.restore()
+
+
 def glyph(painter: QPainter, rect: QRectF, name: str, color: QColor, pixels: float) -> None:
+    if name in DRAWN:
+        weather_mark(painter, rect, name, color, pixels)
+        return
     f = QFont(icon_family())
     f.setPixelSize(max(1, round(pixels)))
     painter.setFont(f)

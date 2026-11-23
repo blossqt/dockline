@@ -28,8 +28,9 @@ RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 ALERT_HOLD = 1.2      # s an alert keeps a hidden dock out, once it is in
 ALERT_SLIDE = 0.22    # s the dock takes to come in
 NOTICE_GAP = 60.0     # s: at most one notification brings the dock out in this time
-SHELL_GONE_MOST = 0.4  # s waited at most for Start or Search to close before a card or menu opens
-SHELL_FADE_MS = 120   # and then for its closing fade
+SHELL_GONE_MOST = 0.5  # s waited at most for Start or Search to be hidden before a card or menu opens
+SHELL_FADE_MS = 200   # and then for its slide-away (about 165 ms here)
+ABOVE_BAR = 8         # px between the bar and a menu or card opened from it
 WM_QUERYENDSESSION, WM_DISPLAYCHANGE = 0x11, 0x7E
 
 
@@ -117,6 +118,7 @@ class Dock(QWidget):
             # The Glass style is the suite's Frosted: the screen behind the bar, blurred (taken and
             # kept up as every suite pop-up's is), under the suite's tint - and as see-through as
             # Hanami's Settings > Appearance > Glass says, followed within seconds.
+            self.own_corners = True          # its 14 px corners are its own, not Windows' 8 (glassfix)
             theme.frost(self, fade=False)
             theme.on_restyle(lambda: self.changed_here('opacity'))
         self.target_screen = screen or QGuiApplication.primaryScreen()
@@ -495,6 +497,10 @@ class Dock(QWidget):
                 win._class_name(win.user32.GetForegroundWindow()) == 'Shell_TrayWnd':
             win.press(0x1B)                              # not found: give the keyboard back
 
+    def glass_sliding(self) -> bool:
+        """Coming in or going out: its glass is pictured once it has settled (glassfix)."""
+        return self.sliding
+
     def glass_held(self) -> bool:
         """Another of Dockline's windows is open over or beside the bar (a card, a menu, the previews,
         the magnified icons): what is behind the bar has not changed, and a new picture of it would
@@ -584,7 +590,10 @@ class Dock(QWidget):
 
     def _poke_ai(self, max_age: float = 20.0) -> None:
         if self.main and not self.testing and any(t.GROUP == 'AI' for t in self.tiles):
-            self.ai.poke(max_age=max_age)
+            if self.sliding:                 # once in: the poll's work on its thread took the slide's frames
+                QTimer.singleShot(motion.OPEN_MS + 60, lambda: self.ai.poke(max_age=max_age))
+            else:
+                self.ai.poke(max_age=max_age)
 
     def _on_low_allowance(self, _provider: str, _label: str, _left: float) -> None:
         """An active AI allowance dropped to 15% left or less: bring a tucked dock out briefly."""
@@ -1026,10 +1035,18 @@ class Dock(QWidget):
         self.show_menu(menu, where)
         menu.deleteLater()
 
-    def show_menu(self, menu, where: QPoint) -> None:
+    def show_menu(self, menu, where: QPoint, above: bool = True) -> None:
+        """A menu from the dock opens clear of it, 8 px away on the screen's side as the cards do (the
+        Windows taskbar's menus open above it), level with the pointer; at the pointer itself when it
+        is not from the bar (above False: a preview's window menu, over the previews)."""
         size = menu.sizeHint()
-        self.clear_shell_before(QRect(where.x() - size.width(), where.y() - size.height(),
-                                      2 * size.width(), 2 * size.height()))
+        if above:
+            screen = self.target_screen.availableGeometry() if not self.testing else self.geometry()
+            x = max(screen.left() + L.MARGIN, min(where.x() - 12, screen.right() - L.MARGIN - size.width()))
+            bar = self.geometry()
+            y = bar.bottom() + 1 + ABOVE_BAR if self.edge == 'top' else bar.top() - ABOVE_BAR - size.height()
+            where = QPoint(x, y)
+        self.clear_shell_before(QRect(where, size))
         menu.exec(where)
 
     def clear_shell_before(self, rect: QRect) -> None:
@@ -1039,14 +1056,16 @@ class Dock(QWidget):
         if self.testing:
             return
         front = win.shell_covering((rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1))
-        if not win.dismiss_shell(front):
+        if not front or not win.dismiss_shell(front):
             return
         loop = QEventLoop()
         until = time.monotonic() + SHELL_GONE_MOST
-        while time.monotonic() < until and win.foreground() == front:
-            QTimer.singleShot(20, loop.quit)
+        while time.monotonic() < until and not win.shell_gone(front):
+            QTimer.singleShot(10, loop.quit)
             loop.exec()
-        QTimer.singleShot(SHELL_FADE_MS, loop.quit)      # and its closing fade is over
+        # its slide-away, which is still on screen after Windows hides it: a card's frosted glass,
+        # pictured sooner, held a blur of Start
+        QTimer.singleShot(SHELL_FADE_MS, loop.quit)
         loop.exec()
 
     def set_hide_taskbar(self, on: bool) -> None:

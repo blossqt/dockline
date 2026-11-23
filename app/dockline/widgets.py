@@ -1972,7 +1972,7 @@ class _MediaCarousel(QWidget):
         self.shown = 0.0                                   # the page in view, fractional while sliding
         self._slide = None
         self._wheel = 0.0
-        self.setFixedHeight(_MediaPage.HEIGHT + self.DOTS)
+        self.setFixedHeight(_MediaPage.HEIGHT)
         self.clock = QTimer(self)                          # the progress bars move while something plays
         self.clock.setInterval(250)
         self.clock.timeout.connect(self.tick_progress)
@@ -1998,6 +1998,14 @@ class _MediaCarousel(QWidget):
         self.shown = float(self.index)
         for page in self.pages:
             page.show()
+        # the dots' strip only with pages to show dots for: with one, the card's foot would be
+        # twice as deep as its head
+        height = _MediaPage.HEIGHT + (self.DOTS if len(self.pages) > 1 else 0)
+        if height != self.minimumHeight():
+            self.setFixedHeight(height)
+            card = getattr(self.tile, 'card', None)
+            if card is not None and card.isVisible():
+                card.refit()
         self.lay_out()
         self.update()
 
@@ -2958,9 +2966,8 @@ class WeatherTile(Tile):
             date = dt.date.fromisoformat(day['date'])
             row = QHBoxLayout()
             name = QLabel('Today' if date == dt.date.today() else f'{date:%A}')
-            icon = QLabel(L.G.get(weather.condition(day['code'])[1], ''))
-            icon.setStyleSheet(f"font-family: '{L.icon_family()}'; font-size: 16px;")
-            icon.setFixedWidth(28)
+            icon = _Glyph(weather.condition(day['code'])[1], self.look, 16)
+            icon.setFixedSize(28, 22)
             high_low = QLabel(f'{round(day["high"])}°  /  {round(day["low"])}°')
             row.addWidget(name, 1)
             row.addWidget(icon)
@@ -3027,6 +3034,20 @@ class _UsageRingCell(QWidget):
 
         if reset_text:
             L.text(painter, QRectF(0, 76, w, 18), reset_text, look.c(look.sub), 11, 400, Qt.AlignCenter)
+
+
+class _Glyph(QWidget):
+    """One of the dock's icons, drawn as the dock draws it (L.glyph: the icon font's, or one drawn
+    where the font has none)."""
+
+    def __init__(self, name: str, look, pixels: float):
+        super().__init__()
+        self.name, self.look, self.pixels = name, look, pixels
+
+    def paintEvent(self, _):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        L.glyph(painter, QRectF(self.rect()), self.name, self.look.c(self.look.text), self.pixels)
 
 
 def _money(amount: float, currency: str = 'USD') -> str:

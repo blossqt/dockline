@@ -239,6 +239,13 @@ class Previews(QWidget):
         target = QRect(x, y, width, height)
         self.stop_glide()
         if was is None:
+            if getattr(self, '_clearing', False):
+                return                                   # Start is being put away for the first: one at a time
+            self._clearing = True
+            try:
+                dock.clear_shell_before(target)          # Start over it: gone before the band is pictured
+            finally:
+                self._clearing = False
             self.take_band(QRect(screen.left(), y, screen.width(), height))
         if not moving:
             self.setGeometry(target)
@@ -553,7 +560,7 @@ class Previews(QWidget):
                 action.triggered.connect(lambda _=False, h=hwnd: self.close_window(h))
             else:
                 action.triggered.connect(lambda _=False, h=hwnd, c=command: (self.close_now(), win.window_command(h, c)))
-        dock.show_menu(menu, where)
+        dock.show_menu(menu, where, above=False)
         menu.deleteLater()
         if not self.underMouse():
             self.leave_soon()

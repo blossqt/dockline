@@ -229,6 +229,16 @@ def shell_covering(rect) -> int:
     return front if overlaps else 0
 
 
+def shell_gone(hwnd) -> bool:
+    """Start or Search has been put away: Windows cloaks its window (about 165 ms after Esc here) and
+    then plays its slide-away, which takes about as long again."""
+    if not hwnd or not user32.IsWindowVisible(hwnd):
+        return True
+    cloaked = wintypes.DWORD()
+    dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), 4)
+    return bool(cloaked.value)
+
+
 def dismiss_shell(front) -> bool:
     """Close Start or the like as Esc does, only while that same window is in front: the key must
     never reach anything else, such as a game behind it."""
