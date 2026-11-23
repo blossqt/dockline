@@ -717,28 +717,36 @@ class ClaudeCosts:
                 start = 0                                     # rewritten: read again
             if stat.st_size == start and stat.st_mtime == seen:
                 continue
+            # Line by line, never the whole file: transcripts run to hundreds of megabytes, and read
+            # whole the first look held Dockline at a gigabyte. Whole lines only; a line still being
+            # written is read next time.
+            end = start
             try:
                 with open(path, 'rb') as handle:
                     handle.seek(start)
-                    chunk = handle.read()
+                    for number, line in enumerate(handle):
+                        if not line.endswith(b'\n'):
+                            break
+                        end += len(line)
+                        if number % 400 == 399:
+                            time.sleep(0)             # Python's lock, to the window's thread now and then
+                        if b'"usage"' not in line or b'"assistant"' not in line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                        except ValueError:
+                            continue
+                        message = entry.get('message')
+                        if entry.get('type') != 'assistant' or not isinstance(message, dict) \
+                                or not message.get('id'):
+                            continue
+                        cost = claude_reply_cost(message.get('model'), message.get('usage'))
+                        at = parse_time(entry.get('timestamp'))
+                        if cost is not None and at is not None and at >= oldest:
+                            self.replies[message['id']] = (at, cost)
             except OSError:
                 continue
-            end = chunk.rfind(b'\n') + 1                      # whole lines only; the rest next time
-            for line in chunk[:end].splitlines():
-                if b'"usage"' not in line or b'"assistant"' not in line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except ValueError:
-                    continue
-                message = entry.get('message')
-                if entry.get('type') != 'assistant' or not isinstance(message, dict) or not message.get('id'):
-                    continue
-                cost = claude_reply_cost(message.get('model'), message.get('usage'))
-                at = parse_time(entry.get('timestamp'))
-                if cost is not None and at is not None and at >= oldest:
-                    self.replies[message['id']] = (at, cost)
-            self.read_to[key] = (start + end, stat.st_mtime)
+            self.read_to[key] = (end, stat.st_mtime)
         self.replies = {k: v for k, v in self.replies.items() if v[0] >= oldest}
 
     def since(self, start: float) -> float:

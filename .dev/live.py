@@ -195,6 +195,16 @@ def run(step: str):
         if hold:
             time.sleep(hold)
         send(mouse(0x4))
+    elif cmd == 'hclick':                  # a click onto Hanami's window alone (its Update button)
+        x, y = int(args[0]), int(args[1])
+        if under(x, y) != 'hanami.exe':
+            print(f'! not clicking ({x},{y}): {under(x, y) or "nothing"} is there')
+            return False
+        u.SetCursorPos(x, y)
+        time.sleep(0.05)
+        send(mouse(0x2))
+        time.sleep(0.06)
+        send(mouse(0x4))
     elif cmd == 'down':                    # the left button held, only on Dockline
         x, y = int(args[0]), int(args[1])
         if under(x, y) != 'dockline.exe':
