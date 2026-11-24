@@ -36,19 +36,19 @@ INFO = {
         'name': 'Claude',
         'short': 'Claude',
         'title': 'Claude Usage',
-        'hint': 'Sign in with Claude Code (claude login) on this PC to show your live allowance.',
+        'hint': 'Requires Claude Code signed in on this PC (claude login).',
     },
     'chatgpt': {
         'name': 'ChatGPT',
         'short': 'ChatGPT',
         'title': 'ChatGPT Usage',
-        'hint': 'Sign in with OpenAI Codex (codex login) on this PC to show your 5-hour and weekly windows.',
+        'hint': 'Requires OpenAI Codex signed in on this PC (codex login).',
     },
     'gemini': {
         'name': 'Gemini',
         'short': 'Gemini',
         'title': 'Gemini Usage',
-        'hint': 'Sign in with Gemini CLI or Antigravity on this PC to show your session and weekly quotas.',
+        'hint': 'Requires Gemini CLI or Antigravity signed in on this PC.',
     },
 }
 
@@ -78,7 +78,7 @@ LIVE_MAX_WAIT = 4.0     # max seconds to wait during continuous streaming before
 MIN_LIVE_GAP = 12.0     # minimum seconds between automatic live polls per provider
 RATE_LIMIT_WAIT = 120   # default seconds to back off if a provider answers HTTP 429
 RATE_LIMIT_SAY = 900    # s: a reading kept this long through rate limits says why it is not newer
-RATE_LIMITED = 'Usage requests are rate-limited. Retrying automatically.'
+RATE_LIMITED = 'Usage requests are rate-limited.'
 LOW_THRESHOLD = 15.0    # warn once per reset window when remaining allowance drops to or below 15%
 CREATE_NO_WINDOW = 0x08000000
 
@@ -1082,7 +1082,7 @@ def fetch_claude(home: Path | None = None, opener=_http_json, renew=None) -> dic
                 return _empty_state(True, CLAUDE_EXPIRED)
             token = again[0]
         except Exception:
-            return _empty_state(True, 'Could not reach Claude right now.')
+            return _empty_state(True, 'Claude could not be reached.')
     windows = parse_claude_usage(payload)
     if not windows:
         return _empty_state(True, 'No active plan window reported by Claude.')
@@ -1158,7 +1158,7 @@ def fetch_chatgpt(home: Path | None = None, opener=_http_json) -> dict:
                     'error': '',
                 }
             if err.code in (401, 403):
-                return _empty_state(True, 'ChatGPT session expired — run codex login to refresh.')
+                return _empty_state(True, 'The ChatGPT sign-in has expired. Run codex login to sign in again.')
             return _empty_state(True, f'ChatGPT usage unavailable ({err}).')
         except Exception:
             if local_windows:
@@ -1170,7 +1170,7 @@ def fetch_chatgpt(home: Path | None = None, opener=_http_json) -> dict:
                     'updated_at': local_stamp or time.time(),
                     'error': '',
                 }
-            return _empty_state(True, 'Could not reach ChatGPT right now.')
+            return _empty_state(True, 'ChatGPT could not be reached.')
     if local_windows:
         return {
             'connected': True,
@@ -1373,11 +1373,11 @@ def fetch_gemini(home: Path | None = None, opener=_http_json, cred_reader=None) 
                             except Exception:
                                 pass
             if err.code == 401:
-                last_error = 'Gemini token expired — open Gemini CLI once to refresh your sign-in.'
+                last_error = 'The Gemini sign-in has expired. Open Gemini CLI to sign in again.'
             else:
                 last_error = f'Gemini quota unavailable ({err}).'
         except Exception:
-            last_error = 'Could not reach Gemini right now.'
+            last_error = 'Gemini could not be reached.'
 
     return _empty_state(True, last_error or 'Could not read Gemini quota.')
 
@@ -1973,7 +1973,7 @@ class AIUsage(QObject):
                     old = time.time() - float(previous.get('updated_at') or 0) > RATE_LIMIT_SAY
                     updated[provider] = {**previous, 'error': RATE_LIMITED if old else ''}
                 else:
-                    updated[provider] = _empty_state(True, 'Rate-limited — will retry shortly.')
+                    updated[provider] = _empty_state(True, 'Rate-limited.')
                 continue
             if not fresh.get('connected') and fresh.get('signed_in') and previous.get('connected') \
                     and previous.get('windows'):

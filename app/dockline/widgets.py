@@ -1311,7 +1311,7 @@ class SearchTile(Tile):
 
 class RecycleTile(Tile):
     ID, NAME, GROUP = 'recycle', 'Recycle Bin', 'Apps & Files'
-    ABOUT = 'What the bin holds, and a click to empty it.'
+    ABOUT = 'Click to empty the Recycle Bin.'
 
     def setup(self):
         self.items, self.bytes = 0, 0
@@ -1407,7 +1407,7 @@ class ScreenshotTile(Tile):
 
 class ProcessorTile(Tile):
     ID, NAME, GROUP = 'cpu', 'CPU', 'System'
-    ABOUT = 'Processor load as a ring. A click opens Task Manager.'
+    ABOUT = 'CPU load. Click to open Task Manager.'
     WIDTH = 1.9
 
     def setup(self):
@@ -1428,7 +1428,7 @@ class ProcessorTile(Tile):
 
 class MemoryTile(Tile):
     ID, NAME, GROUP = 'ram', 'RAM', 'System'
-    ABOUT = 'Memory in use as a ring. A click opens Task Manager.'
+    ABOUT = 'Memory in use. Click to open Task Manager.'
     WIDTH = 2.05
 
     def setup(self):
@@ -1476,7 +1476,7 @@ class NetworkTile(Tile):
 
 class BatteryTile(Tile):
     ID, NAME, GROUP = 'battery', 'Battery', 'System'
-    ABOUT = 'Charge level as a filling gauge, with the charging state.'
+    ABOUT = 'Battery charge and charging state.'
     WIDTH = 2.15
 
     def setup(self):
@@ -1535,7 +1535,7 @@ class NotificationsTile(Tile):
 
 class TaskViewTile(Tile):
     ID, NAME, GROUP = 'taskview', 'Task View', 'Apps & Files'
-    ABOUT = 'Every open window and your virtual desktops, as the taskbar button shows them.'
+    ABOUT = 'Open windows and virtual desktops.'
 
     def paint(self, painter, rect, look):
         L.glyph(painter, rect, '\ue7c4', look.c(look.text), rect.height() * 0.36)
@@ -1546,7 +1546,7 @@ class TaskViewTile(Tile):
 
 class TrayTile(Tile):
     ID, NAME, GROUP = 'tray', 'Tray', 'System'
-    ABOUT = "Background apps: opens the notification area's hidden icons, where right-click works as in the taskbar."
+    ABOUT = "Opens the notification area's hidden icons."
 
     def paint(self, painter, rect, look):
         L.glyph(painter, rect, 'chevron_up', look.c(look.text), rect.height() * 0.34)
@@ -1560,8 +1560,7 @@ IME_MODES = {'zh': ('中', '英'), 'ja': ('あ', 'A'), 'ko': ('가', 'A')}     #
 
 class LanguageTile(Tile):
     ID, NAME, GROUP = 'language', 'Keyboard Language', 'System'
-    ABOUT = 'The input language of the window in front, as the taskbar shows it. A click switches the language ' \
-            'or the input mode.'
+    ABOUT = 'The input language of the active window. Click to switch the language or input mode.'
     WIDTH = 1.3
 
     def setup(self):
@@ -1655,7 +1654,7 @@ class LanguageTile(Tile):
 
 class ShowDesktopTile(Tile):
     ID, NAME, GROUP = 'desktop', 'Show Desktop', 'System'
-    ABOUT = 'Hides every window, and brings them back.'
+    ABOUT = 'Minimises every window, or restores them.'
 
     def paint(self, painter, rect, look):
         L.glyph(painter, rect, 'desktop', look.c(look.text), rect.height() * 0.36)
@@ -1713,7 +1712,7 @@ class ThemeTile(Tile):
 
 class DayProgressTile(Tile):
     ID, NAME, GROUP = 'day', 'Day Progress', 'System'
-    ABOUT = 'How much of today is behind you.'
+    ABOUT = 'How much of the day has passed.'
     WIDTH = 1.9
 
     def share(self) -> float:
@@ -2113,8 +2112,7 @@ class _MediaCarousel(QWidget):
 
 class MediaTile(Tile):
     ID, NAME, GROUP = 'media', 'Media', 'Media & Audio'
-    ABOUT = "Every app playing sound, one card each, as Android's media player: scroll through them to play, " \
-            'pause or skip.'
+    ABOUT = 'One card for each app playing sound. Scroll between them to play, pause or skip.'
 
     def setup(self):
         self.sessions = []
@@ -2505,7 +2503,7 @@ def sound_sides():
 
 class TimerTile(Tile):
     ID, NAME, GROUP = 'timer', 'Timer', 'Productivity'
-    ABOUT = 'A countdown that starts in one click.'
+    ABOUT = 'A countdown timer.'
     WIDTH = 2.15
     PRESETS = (1, 3, 5, 10, 15, 25, 45, 60)
 
@@ -2595,7 +2593,7 @@ class TimerTile(Tile):
 
 class StopwatchTile(Tile):
     ID, NAME, GROUP = 'stopwatch', 'Stopwatch', 'Productivity'
-    ABOUT = 'Start, pause and lap; the card keeps every lap.'
+    ABOUT = 'A stopwatch with laps.'
     WIDTH = 2.35
 
     def setup(self):
@@ -2793,7 +2791,7 @@ class PomodoroTile(Tile):
 
 class NotesTile(Tile):
     ID, NAME, GROUP = 'notes', 'Notes', 'Productivity'
-    ABOUT = 'Your note, one click from editing.'
+    ABOUT = 'A note. Click to edit it.'
     WIDTH = 2.35
 
     def setup(self):
@@ -3732,8 +3730,7 @@ class _AITile(Tile):
 
 class AILimitsTile(_AITile):
     ID, NAME = 'ai_limits', 'AI Limits'
-    ABOUT = 'Two of your AI plans on one tile — Claude, ChatGPT or Gemini — showing how much is left and ' \
-            'when each timer resets.'
+    ABOUT = 'Remaining allowance and reset times for two AI plans: Claude, ChatGPT or Gemini.'
     WIDTH = 4.3
 
     def chosen_rows(self, snap: dict[str, dict]) -> list[tuple[str | None, str, dict]]:
