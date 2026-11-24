@@ -31,6 +31,9 @@ NOTICE_GAP = 60.0     # s: at most one notification brings the dock out in this 
 SHELL_GONE_MOST = 0.5  # s waited at most for Start or Search to be hidden before a card or menu opens
 SHELL_FADE_MS = 200   # and then for its slide-away (about 165 ms here)
 ABOVE_BAR = 8         # px between the bar and a menu or card opened from it
+PEEK_MS = 60          # ms between looks at the pointer (auto-hide), near the edge or with the dock out
+PEEK_FAR_MS = 120     # and while it is tucked away, with the pointer further than PEEK_FAR px from the edge
+PEEK_FAR = 240
 WM_QUERYENDSESSION, WM_DISPLAYCHANGE = 0x11, 0x7E
 
 
@@ -128,7 +131,7 @@ class Dock(QWidget):
         self.tucked = False                   # auto-hidden, beyond the screen's edge
         self.away_since: float | None = None
         self.peek = QTimer(self)              # auto-hide: where the pointer is
-        self.peek.setInterval(60)
+        self.peek.setInterval(PEEK_MS)
         self.peek.timeout.connect(self.watch_pointer)
         self.editing = False
         self.dropping = False                 # files are dragged over the apps
@@ -694,7 +697,7 @@ class Dock(QWidget):
         full-screen game), and away again half a second after the pointer leaves it."""
         if not self.screen_alive():
             return                                   # its display went: Docks moves it within moments
-        if QApplication.activePopupWidget() is None:  # (a menu holds the pointer: it rests as one opens)
+        if not self.tucked and QApplication.activePopupWidget() is None:  # (a menu holds the pointer)
             for tile in self.tiles:
                 if tile.ID == 'apps':
                     tile.check_pointer(QCursor.pos())
@@ -708,6 +711,12 @@ class Dock(QWidget):
         g = self.target_screen.geometry()
         self.keep_in_place()
         if self.tucked:
+            # Looked at less often while the pointer is far from the edge (most of the time): 8 of
+            # the 17 wakings a second a hidden dock had. Near it, as often as ever.
+            far = (pos.y() - g.top()) if self.edge == 'top' else (g.bottom() - pos.y())
+            wanted = PEEK_FAR_MS if far > PEEK_FAR else PEEK_MS
+            if self.peek.interval() != wanted:
+                self.peek.setInterval(wanted)
             inside = g.left() <= pos.x() <= g.right()
             room = self.target_screen.availableGeometry()
             if self.edge == 'top':
@@ -724,6 +733,8 @@ class Dock(QWidget):
                 self.slide(True)
                 self._poke_ai()
             return
+        if self.peek.interval() != PEEK_MS:
+            self.peek.setInterval(PEEK_MS)
         now = time.monotonic()
         if self.busy() or not self.isVisible():
             self.away_since = None
