@@ -360,6 +360,15 @@ def app_windows(own_pid: int) -> list[Window]:
     return found
 
 
+def window_set_icon(hwnd) -> int:
+    """The large icon a window was given (WM_SETICON), not its class's; 0 if none. A program whose
+    file carries only a placeholder often sets its real icon this way."""
+    result = ctypes.c_size_t()
+    if user32.SendMessageTimeoutW(hwnd, 0x7F, 1, 0, 0x2, 50, ctypes.byref(result)):   # ICON_BIG
+        return result.value
+    return 0
+
+
 def window_icon(hwnd) -> int:
     """The icon a window shows in its title bar (an HICON), or 0."""
     for kind in (1, 2, 0):                       # ICON_BIG, ICON_SMALL2, ICON_SMALL

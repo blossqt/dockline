@@ -13,7 +13,7 @@ import winreg
 from typing import NamedTuple
 
 from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
@@ -62,6 +62,25 @@ def _clock(seconds: float, tenths: bool = False) -> str:
     if tenths:
         text += f'.{int(seconds * 10) % 10}'
     return text
+
+
+def small_only(icon: QIcon) -> bool:
+    """Whether an icon has nothing bigger than about 64 pixels: the shell then hands back its small
+    picture in the corner of an otherwise empty large one."""
+    image = icon.pixmap(QSize(256, 256), 1.0).toImage()
+    if image.isNull():
+        return True
+    image = image.convertToFormat(QImage.Format_Alpha8)
+    width, height, line = image.width(), image.height(), image.bytesPerLine()
+    if width < 128 or height < 128:
+        return True
+    corner = width // 4
+    data = bytes(image.constBits())
+    for y in range(height):
+        row = data[y * line:y * line + width]
+        if any(row if y >= corner else row[corner:]):
+            return False
+    return True
 
 
 class Tile(QWidget):
@@ -826,9 +845,17 @@ class AppsTile(Tile):
             pixmap = self.app_id_pixmap(app_id, round(size * ratio))
         own = bool(group.path) and win.has_own_icon(group.path)
         if pixmap is None and own:                       # the shell's large icon is sharper than a window's
-            found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
+            icon = self.provider.icon(QFileInfo(group.path))
+            found = icon.pixmap(QSize(size, size), ratio)
             if not found.isNull() and found.width() >= size * ratio * 0.5:
                 pixmap = found
+            if pixmap is not None and group.windows and small_only(icon):
+                # A file with only a small icon (often the stock placeholder a build tool puts in) gives up
+                # nothing in sharpness to an icon the window set itself, which is then the app's real one.
+                handle = win.window_set_icon(group.windows[0].hwnd)
+                image = QImage.fromHICON(handle) if handle else QImage()
+                if not image.isNull():
+                    pixmap = QPixmap.fromImage(image)
         if pixmap is None and group.windows:
             handle = win.window_icon(group.windows[0].hwnd)
             if handle:
@@ -1215,7 +1242,6 @@ class AppsTile(Tile):
             launch = menu.addAction(name, lambda: (_open(group.path), self.launch(key)))   # the taskbar's top line
             pixmap = self.icon_for(group)
             if pixmap is not None:
-                from PySide6.QtGui import QIcon
                 launch.setIcon(QIcon(pixmap))
             if program:
                 menu.addAction('Run as administrator', lambda: win.shell_open(program, verb='runas'))

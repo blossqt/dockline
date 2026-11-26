@@ -2380,8 +2380,15 @@ class AIUsageTests(Temp):
         dock.deleteLater()
 
 
-class AppIconTests(DockTests):
+class AppIconTests(Temp):
     """Apps whose program file has no icon: Store apps and programs that set one only on their windows."""
+
+    def setUp(self):
+        super().setUp()
+        self.patched(app_windows=lambda pid: [])               # no real windows in the strip
+
+    make = DockTests.make
+    apps = DockTests.apps
 
     def blank_program(self) -> str:
         path = self.folder / 'NoIcon.exe'
@@ -2444,6 +2451,38 @@ class AppIconTests(DockTests):
         asked.clear()
         self.assertIsNotNone(tile.icon_for(win.Group(explorer, [win.Window(302, 'Files', 9, explorer)])))
         self.assertEqual(asked, [], 'a program with its own icon shows that')
+        dock.deleteLater()
+
+    def test_only_small_icons_are_told_apart(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+        from dockline import widgets
+
+        def icon(side, filled):
+            pixmap = QPixmap(side, side)
+            pixmap.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(pixmap)
+            painter.fillRect(QRect(0, 0, filled, filled), QColor(20, 20, 20))
+            painter.end()
+            return QIcon(pixmap)
+        self.assertTrue(widgets.small_only(icon(32, 32)))           # nothing bigger than 32
+        self.assertTrue(widgets.small_only(icon(256, 48)))          # a 48 in the corner of a 256
+        self.assertFalse(widgets.small_only(icon(256, 220)))        # a real large icon
+
+    def test_placeholder_program_icon_gives_way_to_the_windows_own(self):
+        import ctypes
+        from dockline import widgets
+        handle = ctypes.windll.user32.LoadIconW(None, ctypes.c_void_p(32516))     # IDI_INFORMATION
+        self.patched(app_id_of=lambda window: ('', False), window_set_icon=lambda hwnd: handle)
+        real_small_only = widgets.small_only
+        widgets.small_only = lambda icon: True
+        self.addCleanup(setattr, widgets, 'small_only', real_small_only)
+        dock = self.make()
+        tile = self.apps(dock)
+        explorer = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe')
+        pixmap = tile.icon_for(win.Group(explorer, [win.Window(401, 'Ask', 9, explorer)]))
+        from PySide6.QtGui import QImage
+        self.assertEqual(pixmap.toImage(), QImage.fromHICON(handle))
         dock.deleteLater()
 
 
