@@ -31,4 +31,4 @@ for window in win.app_windows(os.getpid()):
         source = 'start shortcut'
     else:
         source = 'BLANK'
-    print(f'{source:15} {window.title[:40]:40} {app_id or "-":50} {window.path}')
+    print(f'{source:20} {window.title[:40]:40} {app_id or "-":50} {window.path}')
