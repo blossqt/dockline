@@ -13,7 +13,7 @@ import winreg
 from typing import NamedTuple
 
 from PySide6.QtCore import QEasingCurve, QFileInfo, QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFontMetricsF, QImage, QPainter, QPen, QPixmap, QTextCursor
+from PySide6.QtGui import QColor, QFontMetricsF, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QButtonGroup, QFileIconProvider, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
                                QPushButton, QScrollArea, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
@@ -62,6 +62,25 @@ def _clock(seconds: float, tenths: bool = False) -> str:
     if tenths:
         text += f'.{int(seconds * 10) % 10}'
     return text
+
+
+def small_only(icon: QIcon) -> bool:
+    """Whether an icon has nothing bigger than about 64 pixels: the shell then hands back its small
+    picture in the corner of an otherwise empty large one."""
+    image = icon.pixmap(QSize(256, 256), 1.0).toImage()
+    if image.isNull():
+        return True
+    image = image.convertToFormat(QImage.Format_Alpha8)
+    width, height, line = image.width(), image.height(), image.bytesPerLine()
+    if width < 128 or height < 128:
+        return True
+    corner = width // 4
+    data = bytes(image.constBits())
+    for y in range(height):
+        row = data[y * line:y * line + width]
+        if any(row if y >= corner else row[corner:]):
+            return False
+    return True
 
 
 class Tile(QWidget):
@@ -409,6 +428,7 @@ class AppsTile(Tile):
         self.keys: list[str] = []
         self.order: list[str] = [key for key in self.dock.cfg['app_order']]
         self.icons: dict[str, QPixmap] = {}
+        self.blank_icons: dict[str, tuple[float, int]] = {}     # shown blank: when to look again, and how often so far
         self.hover_index = -1
         self.press_index = -1
         self.front = 0
@@ -813,22 +833,60 @@ class AppsTile(Tile):
         """One sharp icon per app, at its largest magnified size; drawn smaller as needed."""
         key = group.path.lower() or f'window:{group.windows[0].hwnd if group.windows else 0}'
         if key in self.icons:
-            return self.icons[key]
+            retry = self.blank_icons.get(key)
+            if retry is None or time.monotonic() < retry[0] or not group.windows:
+                return self.icons[key]
+            del self.icons[key]            # it showed the blank picture: its window may have its icon by now
         ratio = self.devicePixelRatioF()
         size = round(self.dock.tile_height * motion.MAGNIFY * self.ICON)
         pixmap = None
-        if group.path:                                   # the shell's large icon is sharper than a window's
-            found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
+        app_id, packaged = win.app_id_of(group.windows[0]) if group.windows else ('', False)
+        if packaged:                                     # a Store app: its package's logo, as the taskbar shows
+            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
+        own = bool(group.path) and win.has_own_icon(group.path)
+        if pixmap is None and own:                       # the shell's large icon is sharper than a window's
+            icon = self.provider.icon(QFileInfo(group.path))
+            found = icon.pixmap(QSize(size, size), ratio)
             if not found.isNull() and found.width() >= size * ratio * 0.5:
                 pixmap = found
+            if pixmap is not None and group.windows and small_only(icon):
+                # A file with only a small icon (often the stock placeholder a build tool puts in) gives up
+                # nothing in sharpness to an icon the window set itself, which is then the app's real one.
+                handle = win.window_set_icon(group.windows[0].hwnd)
+                image = QImage.fromHICON(handle) if handle else QImage()
+                if not image.isNull():
+                    pixmap = QPixmap.fromImage(image)
         if pixmap is None and group.windows:
             handle = win.window_icon(group.windows[0].hwnd)
             if handle:
                 image = QImage.fromHICON(handle)
                 if not image.isNull():
                     pixmap = QPixmap.fromImage(image)
+        if pixmap is None and app_id and not packaged:   # a program whose icon is on its Start shortcut
+            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
+        blank = False
+        if pixmap is None and group.path:                # the shell's own, blank as it may be
+            found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
+            if not found.isNull():
+                pixmap, blank = found, True
+        tries = self.blank_icons.pop(key, (0.0, 0))[1]
+        if blank and group.windows and tries < 5:       # look again a little later, a few times
+            self.blank_icons[key] = (time.monotonic() + 2.0 * (tries + 1), tries + 1)
         if pixmap is not None and (group.windows or group.pinned):
             self.icons[key] = pixmap
+        return pixmap
+
+    def app_id_pixmap(self, app_id: str, pixels: int) -> QPixmap | None:
+        try:
+            found = win.app_id_image(app_id, pixels)
+        except OSError:
+            found = None
+        if found is None:
+            return None
+        data, width, height = found
+        image = QImage(data, width, height, width * 4, QImage.Format_ARGB32_Premultiplied).copy()
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         return pixmap
 
     def index_at(self, pos: QPoint) -> int:
@@ -1184,7 +1242,6 @@ class AppsTile(Tile):
             launch = menu.addAction(name, lambda: (_open(group.path), self.launch(key)))   # the taskbar's top line
             pixmap = self.icon_for(group)
             if pixmap is not None:
-                from PySide6.QtGui import QIcon
                 launch.setIcon(QIcon(pixmap))
             if program:
                 menu.addAction('Run as administrator', lambda: win.shell_open(program, verb='runas'))

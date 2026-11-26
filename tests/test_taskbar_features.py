@@ -2380,5 +2380,111 @@ class AIUsageTests(Temp):
         dock.deleteLater()
 
 
+class AppIconTests(Temp):
+    """Apps whose program file has no icon: Store apps and programs that set one only on their windows."""
+
+    def setUp(self):
+        super().setUp()
+        self.patched(app_windows=lambda pid: [])               # no real windows in the strip
+
+    make = DockTests.make
+    apps = DockTests.apps
+
+    def blank_program(self) -> str:
+        path = self.folder / 'NoIcon.exe'
+        path.write_bytes(b'MZ' + b'\0' * 510)                # a program file with no icon in it
+        return str(path)
+
+    def patched(self, **stand_ins):
+        saved = {name: getattr(win, name) for name in stand_ins}
+        for name, value in stand_ins.items():
+            setattr(win, name, value)
+        self.addCleanup(lambda: [setattr(win, name, value) for name, value in saved.items()])
+
+    def test_program_files_with_and_without_icons(self):
+        explorer = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe')
+        self.assertTrue(win.has_own_icon(explorer))
+        self.assertFalse(win.has_own_icon(self.blank_program()))
+        self.assertTrue(win.has_own_icon(str(some_shortcut())))       # shortcuts are left to the shell
+        self.assertEqual(win.package_app_id(os.getpid()), '')         # Python is not a packaged app
+
+    def test_apps_folder_gives_a_packaged_apps_logo(self):
+        found = win.app_id_image('windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel', 64)
+        if found is None:
+            self.skipTest('Settings is not in the Apps folder here')
+        data, width, height = found
+        self.assertGreaterEqual(width, 32)
+        self.assertEqual(len(data), width * height * 4)
+        self.assertTrue(any(data[3::4]), 'the logo is see-through everywhere')
+        self.assertIsNone(win.app_id_image('No.Such.App_0000000000000!App', 64))
+
+    def test_store_app_shows_its_package_logo(self):
+        red = bytes([0, 0, 255, 255]) * 16                           # BGRA
+        self.patched(app_id_of=lambda window: ('Some.App_x!App', True),
+                     app_id_image=lambda app_id, size: (red, 4, 4))
+        dock = self.make()
+        tile = self.apps(dock)
+        group = win.Group(r'C:\Program Files\WindowsApps\Some.App_x\App.exe', [win.Window(201, 'Store', 9, '')])
+        pixmap = tile.icon_for(group)
+        self.assertIsNotNone(pixmap)
+        self.assertEqual(pixmap.toImage().pixelColor(1, 1).red(), 255)
+        dock.deleteLater()
+
+    def test_program_without_an_icon_shows_its_windows(self):
+        from PySide6.QtGui import QColor, QImage
+        image = QImage(16, 16, QImage.Format_ARGB32)
+        image.fill(QColor(0, 200, 0))
+        asked = []
+
+        def window_icon(hwnd):
+            asked.append(hwnd)
+            return 0
+        self.patched(app_id_of=lambda window: ('', False), window_icon=window_icon)
+        dock = self.make()
+        tile = self.apps(dock)
+        blank = self.blank_program()
+        pixmap = tile.icon_for(win.Group(blank, [win.Window(301, 'Settings', 9, blank)]))
+        self.assertEqual(asked, [301], 'the window was not asked for its icon')
+        self.assertIsNotNone(pixmap)                                  # the blank picture, for now
+        self.assertIn(blank.lower(), tile.blank_icons)                # and it looks again later
+        explorer = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe')
+        asked.clear()
+        self.assertIsNotNone(tile.icon_for(win.Group(explorer, [win.Window(302, 'Files', 9, explorer)])))
+        self.assertEqual(asked, [], 'a program with its own icon shows that')
+        dock.deleteLater()
+
+    def test_only_small_icons_are_told_apart(self):
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+        from dockline import widgets
+
+        def icon(side, filled):
+            pixmap = QPixmap(side, side)
+            pixmap.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(pixmap)
+            painter.fillRect(QRect(0, 0, filled, filled), QColor(20, 20, 20))
+            painter.end()
+            return QIcon(pixmap)
+        self.assertTrue(widgets.small_only(icon(32, 32)))           # nothing bigger than 32
+        self.assertTrue(widgets.small_only(icon(256, 48)))          # a 48 in the corner of a 256
+        self.assertFalse(widgets.small_only(icon(256, 220)))        # a real large icon
+
+    def test_placeholder_program_icon_gives_way_to_the_windows_own(self):
+        import ctypes
+        from dockline import widgets
+        handle = ctypes.windll.user32.LoadIconW(None, ctypes.c_void_p(32516))     # IDI_INFORMATION
+        self.patched(app_id_of=lambda window: ('', False), window_set_icon=lambda hwnd: handle)
+        real_small_only = widgets.small_only
+        widgets.small_only = lambda icon: True
+        self.addCleanup(setattr, widgets, 'small_only', real_small_only)
+        dock = self.make()
+        tile = self.apps(dock)
+        explorer = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe')
+        pixmap = tile.icon_for(win.Group(explorer, [win.Window(401, 'Ask', 9, explorer)]))
+        from PySide6.QtGui import QImage
+        self.assertEqual(pixmap.toImage(), QImage.fromHICON(handle))
+        dock.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()
