@@ -215,7 +215,7 @@ def _join_hanami(app, dock):
     buffer.open(QIODevice.WriteOnly)
     L.render_app_icon(64).save(buffer, 'PNG')
     link = suitelink.SuiteLink('Dockline', bytes(buffer.data()), on_click=clicks.asked.emit)
-    link.set_menu([{'id': 'settings', 'text': 'Dockline Settings…', 'default': True},
+    link.set_menu([{'id': 'settings', 'text': 'Dockline settings…', 'default': True},
                    {'separator': True},
                    {'id': 'quit', 'text': 'Quit Dockline'}], tooltip='Dockline')
     link.start()
