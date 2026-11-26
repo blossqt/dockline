@@ -409,6 +409,7 @@ class AppsTile(Tile):
         self.keys: list[str] = []
         self.order: list[str] = [key for key in self.dock.cfg['app_order']]
         self.icons: dict[str, QPixmap] = {}
+        self.blank_icons: dict[str, tuple[float, int]] = {}     # shown blank: when to look again, and how often so far
         self.hover_index = -1
         self.press_index = -1
         self.front = 0
@@ -813,11 +814,18 @@ class AppsTile(Tile):
         """One sharp icon per app, at its largest magnified size; drawn smaller as needed."""
         key = group.path.lower() or f'window:{group.windows[0].hwnd if group.windows else 0}'
         if key in self.icons:
-            return self.icons[key]
+            retry = self.blank_icons.get(key)
+            if retry is None or time.monotonic() < retry[0] or not group.windows:
+                return self.icons[key]
+            del self.icons[key]            # it showed the blank picture: its window may have its icon by now
         ratio = self.devicePixelRatioF()
         size = round(self.dock.tile_height * motion.MAGNIFY * self.ICON)
         pixmap = None
-        if group.path:                                   # the shell's large icon is sharper than a window's
+        app_id, packaged = win.app_id_of(group.windows[0]) if group.windows else ('', False)
+        if packaged:                                     # a Store app: its package's logo, as the taskbar shows
+            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
+        own = bool(group.path) and win.has_own_icon(group.path)
+        if pixmap is None and own:                       # the shell's large icon is sharper than a window's
             found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
             if not found.isNull() and found.width() >= size * ratio * 0.5:
                 pixmap = found
@@ -827,8 +835,31 @@ class AppsTile(Tile):
                 image = QImage.fromHICON(handle)
                 if not image.isNull():
                     pixmap = QPixmap.fromImage(image)
+        if pixmap is None and app_id and not packaged:   # a program whose icon is on its Start shortcut
+            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
+        blank = False
+        if pixmap is None and group.path:                # the shell's own, blank as it may be
+            found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
+            if not found.isNull():
+                pixmap, blank = found, True
+        tries = self.blank_icons.pop(key, (0.0, 0))[1]
+        if blank and group.windows and tries < 5:       # look again a little later, a few times
+            self.blank_icons[key] = (time.monotonic() + 2.0 * (tries + 1), tries + 1)
         if pixmap is not None and (group.windows or group.pinned):
             self.icons[key] = pixmap
+        return pixmap
+
+    def app_id_pixmap(self, app_id: str, pixels: int) -> QPixmap | None:
+        try:
+            found = win.app_id_image(app_id, pixels)
+        except OSError:
+            found = None
+        if found is None:
+            return None
+        data, width, height = found
+        image = QImage(data, width, height, width * 4, QImage.Format_ARGB32_Premultiplied).copy()
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(self.devicePixelRatioF())
         return pixmap
 
     def index_at(self, pos: QPoint) -> int:

@@ -373,6 +373,189 @@ def window_icon(hwnd) -> int:
     return 0
 
 
+# -- an app's own icon, where its program file has none
+#
+# A program file with no icon in it gets the shell's blank "program" picture, and that is what a
+# Store app (its .exe sits in WindowsApps, often without one) or a program that sets its icon only
+# on its windows showed on the dock. The taskbar instead asks for the app by its AppUserModelID:
+# a packaged app's logo comes from its package, through the shell's Apps folder.
+
+shell32.ExtractIconExW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
+shell32.ExtractIconExW.restype = wintypes.UINT
+shell32.SHCreateItemFromParsingName.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p, ctypes.c_void_p,
+                                                ctypes.POINTER(ctypes.c_void_p)]
+shell32.SHCreateItemFromParsingName.restype = ctypes.c_long
+shell32.SHGetPropertyStoreForWindow.argtypes = [HWND, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+shell32.SHGetPropertyStoreForWindow.restype = ctypes.c_long
+kernel32.GetApplicationUserModelId.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.UINT), wintypes.LPWSTR]
+kernel32.GetApplicationUserModelId.restype = ctypes.c_long
+_ole32 = ctypes.WinDLL('ole32')
+_ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+_ole32.CoInitializeEx.restype = ctypes.c_long
+_ole32.PropVariantClear.argtypes = [ctypes.c_void_p]
+_gdi32 = ctypes.WinDLL('gdi32')
+_gdi32.GetObjectW.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p]
+_gdi32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HANDLE, wintypes.UINT, wintypes.UINT, ctypes.c_void_p,
+                             ctypes.c_void_p, wintypes.UINT]
+_gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
+user32.GetDC.argtypes = [HWND]
+user32.GetDC.restype = wintypes.HDC
+user32.ReleaseDC.argtypes = [HWND, wintypes.HDC]
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD),
+                ('Data4', ctypes.c_ubyte * 8)]
+
+    @classmethod
+    def of(cls, text: str) -> '_GUID':
+        import uuid
+        return cls.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+
+class _PROPERTYKEY(ctypes.Structure):
+    _fields_ = [('fmtid', _GUID), ('pid', wintypes.DWORD)]
+
+
+class _PROPVARIANT(ctypes.Structure):
+    _fields_ = [('vt', wintypes.WORD), ('reserved', wintypes.WORD * 3), ('pointer', ctypes.c_void_p),
+                ('rest', ctypes.c_void_p)]
+
+
+class _BITMAP(ctypes.Structure):
+    _fields_ = [('bmType', wintypes.LONG), ('bmWidth', wintypes.LONG), ('bmHeight', wintypes.LONG),
+                ('bmWidthBytes', wintypes.LONG), ('bmPlanes', wintypes.WORD), ('bmBitsPixel', wintypes.WORD),
+                ('bmBits', ctypes.c_void_p)]
+
+
+class _BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [('biSize', wintypes.DWORD), ('biWidth', wintypes.LONG), ('biHeight', wintypes.LONG),
+                ('biPlanes', wintypes.WORD), ('biBitCount', wintypes.WORD), ('biCompression', wintypes.DWORD),
+                ('biSizeImage', wintypes.DWORD), ('biXPelsPerMeter', wintypes.LONG),
+                ('biYPelsPerMeter', wintypes.LONG), ('biClrUsed', wintypes.DWORD), ('biClrImportant', wintypes.DWORD)]
+
+
+_IID_IPropertyStore = _GUID.of('886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99')
+_IID_IShellItemImageFactory = _GUID.of('BCC18B79-BA16-442F-80C4-8A59C30C463B')
+_PKEY_AppUserModel_ID = _PROPERTYKEY(_GUID.of('9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3'), 5)
+_VT_LPWSTR = 31
+
+
+def _com(obj: ctypes.c_void_p, index: int, *args, argtypes=(), restype=ctypes.c_long):
+    """Call method index of a COM object's vtable."""
+    vtable = ctypes.cast(obj, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+    return ctypes.WINFUNCTYPE(restype, ctypes.c_void_p, *argtypes)(vtable[index])(obj, *args)
+
+
+def _com_release(obj: ctypes.c_void_p) -> None:
+    if obj:
+        _com(obj, 2, restype=wintypes.ULONG)
+
+
+_icon_counts: dict[str, bool] = {}
+
+
+def has_own_icon(path: str) -> bool:
+    """Whether a program file carries an icon of its own. One without gets the shell's blank one.
+    Anything else (a shortcut, a document, a folder) is left to the shell, which shows it well."""
+    if not path.lower().endswith(('.exe', '.dll', '.scr', '.cpl')):
+        return True
+    key = path.lower()
+    if key not in _icon_counts:
+        try:
+            _icon_counts[key] = shell32.ExtractIconExW(path, -1, None, None, 0) > 0
+        except OSError:
+            _icon_counts[key] = True
+    return _icon_counts[key]
+
+
+def package_app_id(pid: int) -> str:
+    """A packaged (Store or MSIX) app's AppUserModelID, from its process; '' for any other program."""
+    handle = kernel32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ''
+    try:
+        length = wintypes.UINT(256)
+        buffer = ctypes.create_unicode_buffer(256)
+        if kernel32.GetApplicationUserModelId(handle, ctypes.byref(length), buffer) == 0:
+            return buffer.value
+        return ''
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def window_app_id(hwnd) -> str:
+    """The AppUserModelID a window gives itself (as the taskbar groups by), or ''."""
+    _ole32.CoInitializeEx(None, 0x2)          # already so on Qt's thread, which is fine
+    store = ctypes.c_void_p()
+    if shell32.SHGetPropertyStoreForWindow(hwnd, ctypes.byref(_IID_IPropertyStore), ctypes.byref(store)) < 0:
+        return ''
+    try:
+        value = _PROPVARIANT()
+        if _com(store, 5, ctypes.byref(_PKEY_AppUserModel_ID), ctypes.byref(value),
+                argtypes=(ctypes.c_void_p, ctypes.c_void_p)) < 0:                   # IPropertyStore::GetValue
+            return ''
+        try:
+            return ctypes.wstring_at(value.pointer) if value.vt == _VT_LPWSTR and value.pointer else ''
+        finally:
+            _ole32.PropVariantClear(ctypes.byref(value))
+    finally:
+        _com_release(store)
+
+
+def app_id_of(window: 'Window') -> tuple[str, bool]:
+    """A window's app as the taskbar knows it: its AppUserModelID, and whether that is a package's."""
+    packaged = package_app_id(window.pid)
+    if packaged:
+        return packaged, True
+    return window_app_id(window.hwnd), False
+
+
+def app_id_image(app_id: str, size: int) -> tuple[bytes, int, int] | None:
+    """The icon the shell's Apps folder shows for an AppUserModelID, about size pixels square, as
+    top-down premultiplied BGRA rows (bytes, width, height); None when the shell has no such app."""
+    if not app_id or size <= 0:
+        return None
+    _ole32.CoInitializeEx(None, 0x2)
+    factory = ctypes.c_void_p()
+    if shell32.SHCreateItemFromParsingName('shell:AppsFolder\\' + app_id, None,
+                                           ctypes.byref(_IID_IShellItemImageFactory),
+                                           ctypes.byref(factory)) < 0 or not factory:
+        return None
+    bitmap = wintypes.HANDLE()
+    try:
+        wanted = wintypes.SIZE(size, size)
+        if _com(factory, 3, wanted, 0x4, ctypes.byref(bitmap),          # GetImage(SIIGBF_ICONONLY)
+                argtypes=(wintypes.SIZE, ctypes.c_int, ctypes.c_void_p)) < 0 or not bitmap:
+            return None
+    finally:
+        _com_release(factory)
+    try:
+        info = _BITMAP()
+        if not _gdi32.GetObjectW(bitmap, ctypes.sizeof(info), ctypes.byref(info)):
+            return None
+        width, height = info.bmWidth, abs(info.bmHeight)
+        if width <= 0 or height <= 0:
+            return None
+        header = _BITMAPINFOHEADER(ctypes.sizeof(_BITMAPINFOHEADER), width, -height, 1, 32, 0)
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        dc = user32.GetDC(None)
+        try:
+            rows = _gdi32.GetDIBits(dc, bitmap, 0, height, pixels, ctypes.byref(header), 0)   # DIB_RGB_COLORS
+        finally:
+            user32.ReleaseDC(None, dc)
+        if rows != height:
+            return None
+        data = pixels.raw
+        if not any(data[3::4]):                # no alpha at all: an opaque picture, not a cut-out icon
+            opaque = bytearray(data)
+            opaque[3::4] = b'\xff' * (width * height)
+            data = bytes(opaque)
+        return data, width, height
+    finally:
+        _gdi32.DeleteObject(bitmap)
+
+
 def foreground() -> int:
     return user32.GetForegroundWindow() or 0
 
