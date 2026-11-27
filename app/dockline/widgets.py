@@ -1597,7 +1597,7 @@ class QuickSettingsTile(Tile):
         L.glyph(painter, rect, 'toggles', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.quick_settings()
+        win.through_notification_center((win.VK_LWIN, ord('A')), QTimer.singleShot)
 
 
 class NotificationsTile(Tile):
@@ -1619,7 +1619,7 @@ class TaskViewTile(Tile):
         L.glyph(painter, rect, '\ue7c4', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.task_view()
+        win.through_notification_center((win.VK_LWIN, 0x09), QTimer.singleShot)
 
 
 class TrayTile(Tile):

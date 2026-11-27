@@ -1145,20 +1145,33 @@ class TrayOpeningTests(unittest.TestCase):
                 mock.patch.object(win, 'shell_open', lambda what, *a: opened.append(what) or True), \
                 mock.patch.object(win.user32, 'FindWindowW', lambda cls, title: 77), \
                 mock.patch.object(win.user32, 'PostMessageW', lambda *a: posted.append(a) or 1):
-            actions = (win.windows_search, win.notification_center, win.task_view, win.task_manager)
+            actions = (win.windows_search, win.notification_center, win.task_manager)
             for action in actions:
                 action()
-            self.assertEqual(len(pressed), 4)
+            self.assertEqual(len(pressed), 3)
             self.assertEqual(opened, [])
             dropped[0] = True
             for action in actions:
                 action()
-            self.assertEqual(len(pressed), 4)
-            self.assertEqual(opened, ['ms-search:', 'ms-actioncenter:',
-                                      'shell:::{3080F90E-D7AD-11D9-BD98-0000947B0257}', 'taskmgr.exe'])
+            self.assertEqual(len(pressed), 3)
+            self.assertEqual(opened, ['ms-search:', 'ms-actioncenter:', 'taskmgr.exe'])
             win.show_desktop()
             self.assertEqual(posted, [(77, 0x0111, 407, 0)])
-            self.assertEqual(len(pressed), 4)
+            self.assertEqual(len(pressed), 3)
+
+            # quick settings and Task View: the notification center first, the keys once it is in front
+            opened.clear()
+            queue = []
+            win.through_notification_center((win.VK_LWIN, ord('A')), lambda ms, step: queue.append(step))
+            self.assertEqual(opened, ['ms-actioncenter:'])
+            queue.pop(0)()                                   # still behind the administrator's window
+            self.assertEqual(len(pressed), 3)
+            dropped[0] = False                               # the notification center is in front
+            queue.pop(0)()
+            queue.pop(0)()
+            self.assertEqual(pressed[-1], (win.VK_LWIN, ord('A')))
+            win.through_notification_center((win.VK_LWIN, 0x09), lambda ms, step: queue.append(step))
+            self.assertEqual(pressed[-1], (win.VK_LWIN, 0x09))   # keys get through: pressed at once
 
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""

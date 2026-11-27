@@ -729,10 +729,6 @@ def show_desktop() -> None:
         press(VK_LWIN, ord('D'))
 
 
-def task_view() -> None:
-    _keys_or((VK_LWIN, 0x09), lambda: shell_open('shell:::{3080F90E-D7AD-11D9-BD98-0000947B0257}'))
-
-
 def notification_center() -> None:
     _keys_or((VK_LWIN, ord('N')), lambda: shell_open('ms-actioncenter:'))
 
@@ -741,15 +737,23 @@ def windows_search() -> None:
     _keys_or((VK_LWIN, ord('S')), lambda: shell_open('ms-search:'))
 
 
-def quick_settings() -> None:
-    """Win+A. Windows has no other way to open quick settings, so while an administrator's window is in
-    front the taskbar is made the active window first (allowed, as the dock was just clicked), and
-    the keys then reach Windows."""
-    if keys_dropped():
-        tray = user32.FindWindowW('Shell_TrayWnd', None)
-        if tray:
-            activate(tray)
-    press(VK_LWIN, ord('A'))
+def through_notification_center(keys: tuple[int, ...], later) -> None:
+    """Keys with no other way in (Win+A, Win+Tab), while an administrator's window in front would drop
+    them: the notification center is opened first (that needs no keys), and once it, not that window,
+    is in front the keys reach Windows. later(ms, step) runs step after ms."""
+    if not keys_dropped() or not shell_open('ms-actioncenter:'):
+        press(*keys)
+        return
+    tries = [0]
+
+    def wait():
+        tries[0] += 1
+        if keys_dropped() and tries[0] < 60:           # in front within ~30 ms here; up to a second
+            later(16, wait)
+        elif not keys_dropped():
+            later(400, lambda: press(*keys))           # its slide-in first, or the keys are lost
+
+    later(16, wait)
 
 
 def press(*keys: int) -> None:
