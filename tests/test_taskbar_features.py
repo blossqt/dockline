@@ -184,6 +184,22 @@ class DockTests(Temp):
         self.assertFalse(carousel.pages[1].buttons['next'].isEnabled())
         tile.card.close()
 
+    def test_clock_card_shows_seconds(self):
+        """The clock's card has the time with seconds, kept current while it is open."""
+        dock = self.make()
+        tile = next(t for t in dock.tiles if t.ID == 'clock')
+        tile.click(tile.rect().center())
+        self.assertRegex(tile.big.text(), r'^\d{1,2}:\d\d:\d\d [AP]M$')
+        self.assertTrue(tile.seconds.isActive())
+        self.assertLessEqual(tile.seconds.remainingTime(), 1005)
+        dock.cfg['clock24'] = True
+        tile.next_second()
+        self.assertRegex(tile.big.text(), r'^\d\d:\d\d:\d\d$')
+        tile.card.close()
+        tile.card_closed()
+        self.assertIsNone(tile.big)
+        self.assertFalse(tile.seconds.isActive())
+
     def test_closed_card_is_deleted_by_qt_alone(self):
         import shiboken6
         from dockline.card import Card
@@ -1117,6 +1133,45 @@ class TrayOpeningTests(unittest.TestCase):
             tray[0] = 0
             win.open_start()
             self.assertEqual(pressed, [(win.VK_LWIN,)])
+
+    def test_shell_buttons_work_over_an_administrators_window(self):
+        """Search, notifications, Task View and Task Manager press their keys as before, and take
+        another way only while an administrator's window in front would drop them. Show desktop
+        always asks the taskbar."""
+        from unittest import mock
+        pressed, opened, posted, dropped = [], [], [], [False]
+        with mock.patch.object(win, 'keys_dropped', lambda: dropped[0]), \
+                mock.patch.object(win, 'press', lambda *keys: pressed.append(keys)), \
+                mock.patch.object(win, 'shell_open', lambda what, *a: opened.append(what) or True), \
+                mock.patch.object(win.user32, 'FindWindowW', lambda cls, title: 77), \
+                mock.patch.object(win.user32, 'PostMessageW', lambda *a: posted.append(a) or 1):
+            actions = (win.windows_search, win.notification_center, win.task_manager)
+            for action in actions:
+                action()
+            self.assertEqual(len(pressed), 3)
+            self.assertEqual(opened, [])
+            dropped[0] = True
+            for action in actions:
+                action()
+            self.assertEqual(len(pressed), 3)
+            self.assertEqual(opened, ['ms-search:', 'ms-actioncenter:', 'taskmgr.exe'])
+            win.show_desktop()
+            self.assertEqual(posted, [(77, 0x0111, 407, 0)])
+            self.assertEqual(len(pressed), 3)
+
+            # quick settings and Task View: the notification center first, the keys once it is in front
+            opened.clear()
+            queue = []
+            win.through_notification_center((win.VK_LWIN, ord('A')), lambda ms, step: queue.append(step))
+            self.assertEqual(opened, ['ms-actioncenter:'])
+            queue.pop(0)()                                   # still behind the administrator's window
+            self.assertEqual(len(pressed), 3)
+            dropped[0] = False                               # the notification center is in front
+            queue.pop(0)()
+            queue.pop(0)()
+            self.assertEqual(pressed[-1], (win.VK_LWIN, ord('A')))
+            win.through_notification_center((win.VK_LWIN, 0x09), lambda ms, step: queue.append(step))
+            self.assertEqual(pressed[-1], (win.VK_LWIN, 0x09))   # keys get through: pressed at once
 
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
