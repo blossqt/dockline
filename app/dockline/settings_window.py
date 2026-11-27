@@ -10,7 +10,7 @@ import os
 import threading
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLineEdit,
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLineEdit,
                                QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from . import __version__
@@ -18,7 +18,7 @@ from . import look as L
 from . import suitesettings
 from . import suitetheme as theme
 from . import weather
-from .suitesettings import SMALL, form, label, note, section, switch
+from .suitesettings import SMALL, label, note, section, switch
 
 BACKDROP = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backdrop.jpg')   # Hanami's blossom, faint
 
@@ -43,6 +43,23 @@ def _choice(options: list[tuple[str, str]], current, changed) -> QWidget:
     group.setParent(control)
     control.buttons_group = group
     return control
+
+
+class _Rows(QGridLayout):
+    """Settings with a name before each, the names in a column on the left, each centred on its
+    choice's height (a form layout put them at the choices' tops)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setHorizontalSpacing(16)
+        self.setVerticalSpacing(suitesettings.ITEMS)
+        self.setColumnStretch(1, 1)
+
+    def addRow(self, name, field) -> None:
+        row = self.rowCount()
+        self.addWidget(name, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.addWidget(field, row, 1, Qt.AlignVCenter)
 
 
 def _button(words: str, slot) -> QPushButton:
@@ -188,7 +205,7 @@ class SettingsWindow(QWidget):
     def appearance(self, layout: QVBoxLayout) -> None:
         cfg = self.cfg
         box_frame, box = section('The dock')
-        rows = form()
+        rows = _Rows()
         rows.addRow(label('Style'), self.choice([(k, L.LOOKS[k].label) for k in L.STYLES], cfg['look'],
                                                 lambda v: self.set('look', v, 'look')))
         rows.addRow(label('Size'), self.choice([('S', 'Small'), ('M', 'Medium'), ('L', 'Large')], cfg['size'],
@@ -203,7 +220,7 @@ class SettingsWindow(QWidget):
     def clock_page(self, layout: QVBoxLayout) -> None:
         cfg = self.cfg
         box_frame, box = section('Clock')
-        rows = form()
+        rows = _Rows()
         rows.addRow(label('Clock'), self.choice([(False, '12-hour'), (True, '24-hour')], cfg['clock24'],
                                                 lambda v: self.set('clock24', v, 'clock')))
         rows.addRow(label('Temperature'), self.choice([(False, 'Celsius'), (True, 'Fahrenheit')], cfg['fahrenheit'],
