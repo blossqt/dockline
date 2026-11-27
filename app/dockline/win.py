@@ -668,7 +668,6 @@ def open_start() -> None:
         press(VK_LWIN)
 
 
-<<<<<<< HEAD
 advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
 advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
 advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
@@ -715,8 +714,6 @@ def _keys_or(keys: tuple[int, ...], other) -> None:
         press(*keys)
 
 
-=======
->>>>>>> origin/claude/project-thread-9tukn0
 def task_manager() -> None:
     """Open Task Manager as the taskbar's menu does: Ctrl+Shift+Esc, which Windows answers itself, so
     no elevation prompt and no second copy if it is open already. While an administrator's window is in
