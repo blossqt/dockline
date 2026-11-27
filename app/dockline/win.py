@@ -560,9 +560,28 @@ def app_id_image(app_id: str, size: int) -> tuple[bytes, int, int] | None:
             opaque = bytearray(data)
             opaque[3::4] = b'\xff' * (width * height)
             data = bytes(opaque)
+        elif not _premultiplied(data):
+            data = _premultiply(data)          # its see-through edges came out as stray colours (2026-11-27)
         return data, width, height
     finally:
         _gdi32.DeleteObject(bitmap)
+
+
+def _premultiplied(data: bytes) -> bool:
+    """Whether BGRA pixels are premultiplied: then no colour is brighter than its pixel's alpha."""
+    return all(data[n] <= a and data[n + 1] <= a and data[n + 2] <= a
+               for n, a in zip(range(0, len(data), 4), data[3::4]) if a < 255)
+
+
+def _premultiply(data: bytes) -> bytes:
+    out = bytearray(data)
+    for n in range(0, len(out), 4):
+        a = out[n + 3]
+        if a < 255:
+            out[n] = out[n] * a // 255
+            out[n + 1] = out[n + 1] * a // 255
+            out[n + 2] = out[n + 2] * a // 255
+    return bytes(out)
 
 
 def foreground() -> int:

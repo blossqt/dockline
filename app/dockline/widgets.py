@@ -428,6 +428,7 @@ class AppsTile(Tile):
         self.keys: list[str] = []
         self.order: list[str] = [key for key in self.dock.cfg['app_order']]
         self.icons: dict[str, QPixmap] = {}
+        self.sized: dict[tuple[int, int], QPixmap] = {}           # icons made smaller ahead (sized_icon)
         self.blank_icons: dict[str, tuple[float, int]] = {}     # shown blank: when to look again, and how often so far
         self.hover_index = -1
         self.press_index = -1
@@ -876,6 +877,24 @@ class AppsTile(Tile):
             self.icons[key] = pixmap
         return pixmap
 
+    SIZED_KEPT = 160
+
+    def sized_icon(self, pixmap: QPixmap, pixels: float) -> QPixmap:
+        """The icon made smaller ahead, averaging its pixels, rather than drawn smaller: drawing samples
+        only a few of them, which left the edges stepped (2026-11-27). Kept for the sizes asked lately."""
+        wanted = round(pixels)
+        if wanted <= 0 or wanted >= max(pixmap.width(), pixmap.height()):
+            return pixmap
+        key = (pixmap.cacheKey(), wanted)
+        found = self.sized.get(key)
+        if found is None:
+            image = pixmap.toImage().scaled(wanted, wanted, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            found = QPixmap.fromImage(image)
+            if len(self.sized) >= self.SIZED_KEPT:
+                self.sized.pop(next(iter(self.sized)))
+            self.sized[key] = found
+        return found
+
     def app_id_pixmap(self, app_id: str, pixels: int) -> QPixmap | None:
         try:
             found = win.app_id_image(app_id, pixels)
@@ -941,6 +960,8 @@ class AppsTile(Tile):
                         size, size)
         pixmap = self.icon_for(group)
         if pixmap is not None:
+            ratio = painter.device().devicePixelRatioF() if painter.device() is not None else 1.0
+            pixmap = self.sized_icon(pixmap, target.width() * ratio * painter.transform().m11())
             painter.drawPixmap(target, pixmap, QRectF(pixmap.rect()))
         else:
             painter.setPen(Qt.NoPen)
