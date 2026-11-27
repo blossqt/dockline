@@ -35,6 +35,7 @@ class _Choice(QFrame):
         name = QLabel(widget.NAME)
         name.setObjectName('name')
         about = QLabel(widget.ABOUT)
+        about.setObjectName('blurb')
         about.setWordWrap(True)
         layout.addWidget(name)
         layout.addWidget(about)
@@ -56,19 +57,18 @@ class _Choice(QFrame):
     BADGE = 22
 
     def paintEvent(self, event):
-        """On the dock: the card as any other, its outline drawn in the chosen colour and a round
-        check in its corner (a whole card in black among pale ones was jarring)."""
+        """On the dock: the card as any other, its outline in the suite's pink and a round pink
+        check in its corner (black, as before, was jarring on the glass)."""
         super().paintEvent(event)
         if not self.on:
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        fill = QColor(self.palette().color(self.foregroundRole()))
         badge = QRectF(self.width() - self.BADGE - 12, 12, self.BADGE, self.BADGE)
         painter.setPen(Qt.NoPen)
-        painter.setBrush(fill)
+        painter.setBrush(QColor(theme.ACCENT))
         painter.drawEllipse(badge)
-        mark = QColor('#111114') if fill.lightness() > 128 else QColor('#fafafa')
+        mark = QColor(theme.ON_ACCENT)
         from PySide6.QtGui import QPen
         from PySide6.QtCore import QPointF
         painter.setPen(QPen(mark, 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -133,15 +133,15 @@ class Picker(QWidget):
         self.refresh()
 
     def build_page(self) -> None:
-        """Settings' Widgets page: groups as a row of buttons above the search (Settings has its own
-        sidebar)."""
-        self.setObjectName('root')
+        """Settings' Widgets page, laid out as the suite's settings pages: its title in Geist Serif,
+        the groups as pink chips above the search (Settings has its own sidebar)."""
+        from . import suitesettings
+        self.setObjectName('picker')
+        theme.restyle(self, suite_css)
         main = QVBoxLayout(self)
-        main.setContentsMargins(24, 24, 24, 16)
-        main.setSpacing(16)
-        title = QLabel('Widgets')
-        title.setObjectName('title')
-        main.addWidget(title)
+        main.setContentsMargins(4, 4, 4, 4)
+        main.setSpacing(suitesettings.ITEMS)
+        main.addWidget(suitesettings.heading('Widgets', 21))
         groups_box = QGridLayout()
         groups_box.setContentsMargins(0, 0, 0, 0)
         groups_box.setHorizontalSpacing(8)
@@ -151,6 +151,7 @@ class Picker(QWidget):
         per_row = 4 if len(names) > 7 else len(names)
         for index, name in enumerate(names):
             button = QPushButton(name.replace('&', '&&'))         # '&' would be taken as a shortcut mark
+            button.setObjectName('filter')
             button.setCheckable(True)
             button.setChecked(name == ALL)
             button.setFocusPolicy(Qt.NoFocus)
@@ -165,14 +166,10 @@ class Picker(QWidget):
         self.search.setPlaceholderText('Search widgets')
         self.search.textChanged.connect(lambda _: self.refresh())
         main.addWidget(self.search)
-        note = QLabel('Click a widget to add or remove it. Drag widgets along the dock to reorder them, or '
-                      'drag a widget\'s right handle to resize it (double-click the handle to reset).')
-        note.setObjectName('sub')
-        note.setWordWrap(True)
-        main.addWidget(note)
-        self.area = QScrollArea()
-        self.area.setWidgetResizable(True)
-        self.area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        main.addWidget(suitesettings.note('Click a widget to add or remove it. Drag widgets along the dock to '
+                                          'reorder them, or drag a widget\'s right handle to resize it '
+                                          '(double-click the handle to reset).'))
+        self.area = suitesettings.scrolled(QWidget())
         main.addWidget(self.area, 1)
         self.refresh()
 
@@ -191,7 +188,7 @@ class Picker(QWidget):
                  if (group == ALL or w.GROUP == group)
                  and (not words or words in w.NAME.lower() or words in w.ABOUT.lower())]
         host = QWidget()
-        host.setObjectName('root')
+        host.setObjectName('scrolled' if self.embedded else 'root')
         grid = QGridLayout(host)
         grid.setContentsMargins(0, 0, 8, 0)
         grid.setSpacing(8)
@@ -201,6 +198,7 @@ class Picker(QWidget):
         if not shown:
             empty = QLabel('No widgets match this search.')
             empty.setObjectName('sub')
+            empty.setProperty('role', 'dim')
             grid.addWidget(empty, 0, 0)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -260,3 +258,21 @@ class Picker(QWidget):
         if not self.embedded:
             self.dock.picker_closed()
         super().closeEvent(event)
+
+
+def suite_css() -> str:
+    """Settings' Widgets page in the suite's look: the widgets as cards on the glass, outlined in
+    pink while on the dock, and the groups as chips, pink while chosen."""
+    c = theme.colors()
+    return theme.panel_css('QFrame#choice', 12) + f"""
+        QFrame#choice:hover {{ border-color: {theme.css(c.dim)}; }}
+        QFrame#choice[on="true"] {{ border-color: {theme.ink()}; }}
+        QLabel#name {{ font-weight: 600; background: transparent; }}
+        QLabel#blurb, QLabel#preview {{ background: transparent; }}
+        QLabel#blurb, QLabel#sub {{ color: {c.dim.name()}; }}
+        QPushButton#filter {{ background: transparent; border: 1px solid {theme.css(c.border)}; border-radius: 13px;
+                              padding: 5px 14px; color: {c.dim.name()}; }}
+        QPushButton#filter:hover {{ color: {c.text.name()}; border-color: {theme.css(c.dim)}; }}
+        QPushButton#filter:checked {{ background: {theme.ACCENT}; border-color: {theme.ACCENT};
+                                      color: {theme.ON_ACCENT}; }}
+    """

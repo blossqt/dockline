@@ -98,8 +98,13 @@ G = {
     'down': '', 'up': '', 'left': '', 'right': '', 'toggles': '',
     'rain': '', 'snow': '', 'storm': '', 'focus': '', 'calendar': '',
 }
+G['keyboard'] = '\ue765'         # Fluent's KeyboardClassic
 G['chevron_up'] = ''           # the tray's "show hidden icons"
 G['refresh'] = '\ue72c'         # refresh AI limits
+
+
+PICKED, ON_PICKED = '#ffd1dc', '#a61e4d'    # the suite's blossom pink (suitetheme.ACCENT), for what is chosen
+                                            # in Settings and the dock's cards, rather than solid black
 
 
 def chip(look) -> QColor:
@@ -425,13 +430,19 @@ def paint_backdrop(painter: QPainter, rect: QRectF, radius: float, backdrop) -> 
     painter.restore()
 
 
+def serif_family() -> str:
+    """Geist Serif, the suite's titles (as Hanami's), or Segoe UI where its file is missing."""
+    from . import suitetheme
+    return suitetheme.serif(13).family()
+
+
 def card_css(look: Look) -> str:
     fg = look.text
-    PINK, ON_PINK = chip(look).name(), on_chip(look).name()
+    PINK, ON_PINK = PICKED, ON_PICKED
     return f"""
     QWidget {{ color: {fg}; font-family: 'Segoe UI Variable Text'; font-size: 14px; }}
     QLabel {{ background: transparent; }}
-    QLabel#title {{ font-size: 16px; font-weight: 600; }}
+    QLabel#title {{ font-family: '{serif_family()}'; font-size: 13pt; font-weight: 400; }}
     QLabel#big {{ font-size: 30px; font-weight: 600; }}
     QLabel#sub {{ color: {rgba(look.sub)}; font-size: 13px; }}
     QPushButton {{ background: {rgba(look.tile)}; border: none; border-radius: 8px; padding: 6px 12px;
@@ -486,7 +497,7 @@ def settings_css(look: 'Look', opacity: int = 18) -> str:
     else:
         styles = WINDOW_STYLES.get(look.name, WINDOW_STYLES['black' if look.dark else 'white'])
     root, page, fg, sub, field, line, hover, panel, button = styles
-    PINK, ON_PINK = chip(look).name(), on_chip(look).name()
+    PINK, ON_PINK = PICKED, ON_PICKED
     window = root
     return f"""
     QWidget#window {{ background: {window}; }}

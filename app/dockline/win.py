@@ -850,6 +850,15 @@ def shell_open(program: str, arguments: str = '', folder: str | None = None, ver
     return shell32.ShellExecuteW(None, verb, program, arguments or None, folder or None, 1) > 32
 
 
+def toggle_on_screen_keyboard() -> bool:
+    """Windows' On-Screen Keyboard: open it, or close it when it is open already. True if it opened."""
+    hwnd = user32.FindWindowW('OSKMainClass', None)
+    if hwnd and user32.IsWindowVisible(hwnd):
+        user32.PostMessageW(hwnd, 0x0112, 0xF060, 0)        # WM_SYSCOMMAND, SC_CLOSE
+        return False
+    return shell_open('osk.exe')                            # it asks for UI access: ShellExecute, not CreateProcess
+
+
 def end_process(pid: int) -> bool:
     """End a program at once (the taskbar's End task)."""
     handle = kernel32.OpenProcess(0x0001, False, pid)          # PROCESS_TERMINATE

@@ -64,7 +64,7 @@ def menu_css(look: L.Look, fill=None) -> str:
     QMenu {{ background: {L.rgba(fill if fill is not None else look.panel)}; border: 1px solid {L.rgba(look.edge)}; border-radius: 10px;
              padding: 6px; font-family: 'Segoe UI Variable Text'; font-size: 14px; }}
     QMenu::item {{ color: {look.text}; padding: 7px 28px 7px 14px; border-radius: 6px; }}
-    QMenu::item:selected {{ background: {L.chip(look).name()}; color: {L.on_chip(look).name()}; }}
+    QMenu::item:selected {{ background: {'rgba(255,255,255,46)' if look.dark else 'rgba(0,0,0,20)'}; color: {look.text}; }}
     QMenu::separator {{ height: 1px; background: {L.rgba(look.edge)}; margin: 5px 8px; }}
     QMenu::indicator {{ width: 0; }}
     """
