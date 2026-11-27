@@ -2453,6 +2453,24 @@ class AppIconTests(Temp):
         self.assertEqual(asked, [], 'a program with its own icon shows that')
         dock.deleteLater()
 
+    def test_icons_are_made_smaller_ahead_with_smooth_edges(self):
+        from PySide6.QtGui import QColor, QPixmap
+        dock = self.make()
+        tile = self.apps(dock)
+        big = QPixmap(256, 256)
+        big.fill(QColor(200, 30, 30))
+        small = tile.sized_icon(big, 40.4)
+        self.assertEqual((small.width(), small.height()), (40, 40))
+        self.assertIs(tile.sized_icon(big, 40), small)                 # kept, not made again
+        self.assertIs(tile.sized_icon(big, 300), big)                   # never made bigger
+        dock.deleteLater()
+
+    def test_straight_alpha_logos_are_premultiplied(self):
+        straight = bytes([200, 100, 50, 128, 0, 0, 0, 255, 255, 255, 255, 0])
+        self.assertFalse(win._premultiplied(straight))
+        self.assertEqual(list(win._premultiply(straight)), [100, 50, 25, 128, 0, 0, 0, 255, 0, 0, 0, 0])
+        self.assertTrue(win._premultiplied(bytes([100, 50, 25, 128, 9, 9, 9, 255])))
+
     def test_only_small_icons_are_told_apart(self):
         from PySide6.QtCore import QRect
         from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
