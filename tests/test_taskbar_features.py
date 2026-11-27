@@ -2575,5 +2575,33 @@ class AppIconTests(Temp):
         dock.deleteLater()
 
 
+class CentredTextTests(Temp):
+    """Every line of text on every settings page has its letters centred on the icon, switch,
+    button or box beside it - "Settings" by the logo too (the user, 2026-11-27: "Text not
+    centered man check all the text check all the spacing")."""
+
+    def test_every_settings_page(self):
+        from PySide6.QtCore import QEventLoop, QTimer
+        from dockline import suitesettings
+        from dockline.dock import Dock
+        from dockline.settings_window import SettingsWindow
+        cfg = Config(None)
+        cfg['widgets'] = ['start', 'apps', 'language', 'clock']
+        dock = Dock(cfg, testing=True)
+        window = SettingsWindow(dock)
+        window.show()
+        try:
+            for index, title in enumerate(window.nav.titles()):
+                window.nav.choose(index)
+                loop = QEventLoop()
+                QTimer.singleShot(400, loop.quit)
+                loop.exec()
+                self.assertEqual(suitesettings.misaligned(window), [], title)
+        finally:
+            window.close()
+            dock.close()
+            dock.deleteLater()
+
+
 if __name__ == '__main__':
     unittest.main()
