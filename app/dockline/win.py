@@ -656,6 +656,18 @@ _EXTENDED = {VK_LWIN, VK_MEDIA_NEXT, VK_MEDIA_PREV, VK_MEDIA_PLAY_PAUSE}
 VK_CONTROL = 0x11
 
 
+WM_SYSCOMMAND, SC_TASKLIST = 0x0112, 0xF130
+
+
+def open_start() -> None:
+    """Open Start, or close it if it is open, as the Windows key does. Asked of the taskbar itself
+    rather than by pressing the key: Windows drops keys an ordinary program sends while an
+    administrator's window (Task Manager) is in front, and the taskbar still answers while hidden."""
+    tray = user32.FindWindowW('Shell_TrayWnd', None)
+    if not tray or not user32.PostMessageW(tray, WM_SYSCOMMAND, SC_TASKLIST, 0):
+        press(VK_LWIN)
+
+
 def task_manager() -> None:
     """Open Task Manager as the taskbar's menu does: Ctrl+Shift+Esc, which Windows answers itself, so
     no elevation prompt and no second copy if it is open already."""

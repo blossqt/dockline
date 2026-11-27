@@ -404,7 +404,7 @@ class StartTile(Tile):
                        look.c(look.accent))
 
     def click(self, pos):
-        win.press(win.VK_LWIN)
+        win.open_start()
 
 
 class Shown(NamedTuple):
