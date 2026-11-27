@@ -1102,6 +1102,22 @@ class TrayOpeningTests(unittest.TestCase):
             self.assertEqual(pressed, [(win.VK_LWIN, ord('B'))])
 
 
+    def test_start_opened_without_keys(self):
+        """The Start button asks the taskbar to open Start (keys are dropped while an administrator's
+        window is in front); the Windows key only when there is no taskbar to ask."""
+        from unittest import mock
+        posted, pressed, tray = [], [], [77]
+        with mock.patch.object(win.user32, 'FindWindowW', lambda cls, title: tray[0]), \
+                mock.patch.object(win.user32, 'PostMessageW', lambda *a: posted.append(a) or 1), \
+                mock.patch.object(win, 'press', lambda *keys: pressed.append(keys)):
+            from dockline.widgets import StartTile
+            StartTile.click(None, None)
+            self.assertEqual(posted, [(77, win.WM_SYSCOMMAND, win.SC_TASKLIST, 0)])
+            self.assertEqual(pressed, [])
+            tray[0] = 0
+            win.open_start()
+            self.assertEqual(pressed, [(win.VK_LWIN,)])
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 
