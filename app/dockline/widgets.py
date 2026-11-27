@@ -1741,6 +1741,17 @@ class ShowDesktopTile(Tile):
         win.press(win.VK_LWIN, ord('D'))
 
 
+class KeyboardTile(Tile):
+    ID, NAME, GROUP = 'keyboard', 'On-Screen Keyboard', 'System'
+    ABOUT = "Opens Windows' On-Screen Keyboard, or closes it."
+
+    def paint(self, painter, rect, look):
+        L.glyph(painter, rect, 'keyboard', look.c(look.text), rect.height() * 0.38)
+
+    def click(self, pos):
+        win.toggle_on_screen_keyboard()          # it types into the window in front (the dock never takes the keyboard)
+
+
 THEME_KEY = r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
 
 
@@ -3901,7 +3912,7 @@ class GeminiTile(_SingleProviderAITile):
 WIDGETS: list[type[Tile]] = [
     StartTile, TaskViewTile, AppsTile, SearchTile, RecycleTile, StorageTile, ScreenshotTile,
     AILimitsTile, ClaudeTile, ChatGPTTile, GeminiTile,
-    ProcessorTile, MemoryTile, NetworkTile, BatteryTile, TrayTile, LanguageTile, QuickSettingsTile, NotificationsTile, ShowDesktopTile,
+    ProcessorTile, MemoryTile, NetworkTile, BatteryTile, TrayTile, LanguageTile, QuickSettingsTile, NotificationsTile, ShowDesktopTile, KeyboardTile,
     ThemeTile, DayProgressTile,
     MediaTile, VolumeTile,
     TimerTile, StopwatchTile, PomodoroTile, NotesTile,

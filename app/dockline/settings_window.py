@@ -1,47 +1,121 @@
-"""Settings: appearance, dock size and edge, clock, weather location, the taskbar and startup."""
+"""Settings: appearance, dock size and edge, clock, weather location, the taskbar and startup.
+
+Laid out as Hanami's and the other suite apps' settings are (suitesettings.SettingsFrame): the
+suite's glass with its faint blossom, the pages down the left with icons and a pink bar sliding to
+the one chosen, Geist Serif titles, rounded sections, switches and segmented choices."""
 
 from __future__ import annotations
 
+import os
 import threading
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout,
-                               QWidget)
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLineEdit,
+                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from . import __version__
 from . import look as L
+from . import suitesettings
 from . import suitetheme as theme
 from . import weather
+from .suitesettings import SMALL, label, note, section, switch
+
+BACKDROP = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backdrop.jpg')   # Hanami's blossom, faint
 
 
 class _Found(QObject):
     done = Signal(object, str)
 
 
-def _choice(options: list[tuple[str, str]], current: str, changed) -> QWidget:
-    """A row of buttons of which one is chosen."""
-    host = QWidget()
-    row = QHBoxLayout(host)
-    row.setContentsMargins(0, 0, 0, 0)
-    row.setSpacing(8)
-    group = QButtonGroup(host)
-    group.setExclusive(True)
-    for value, label in options:
-        button = QPushButton(label)
+def _choice(options: list[tuple[str, str]], current, changed) -> QWidget:
+    """A choice of a few, as Hanami's: a soft track with a frosted pill sliding to the one chosen."""
+    group = QButtonGroup()
+    buttons = []
+    for value, words in options:
+        button = QPushButton(words)
         button.setCheckable(True)
         button.setChecked(value == current)
         button.setFocusPolicy(Qt.NoFocus)
-        button.setCursor(Qt.PointingHandCursor)
         button.clicked.connect(lambda _=False, v=value: changed(v))
         group.addButton(button)
-        row.addWidget(button)
-    row.addStretch(1)
-    host.buttons = group
-    return host
+        buttons.append(button)
+    control = suitesettings.Segmented(buttons)
+    group.setParent(control)
+    control.buttons_group = group
+    return control
+
+
+class _Rows(QGridLayout):
+    """Settings with a name before each, the names in a column on the left, each centred on its
+    choice's height (a form layout put them at the choices' tops)."""
+
+    def __init__(self):
+        super().__init__()
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setHorizontalSpacing(16)
+        self.setVerticalSpacing(suitesettings.ITEMS)
+        self.setColumnStretch(1, 1)
+
+    def addRow(self, name, field) -> None:
+        row = self.rowCount()
+        self.addWidget(name, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.addWidget(field, row, 1, Qt.AlignVCenter)
+
+
+def _button(words: str, slot) -> QPushButton:
+    button = QPushButton(words)
+    button.setCursor(Qt.PointingHandCursor)
+    button.clicked.connect(slot)
+    return button
+
+
+class _Reveal(QObject):
+    """A page's sections rising into place as scrolling brings them into sight - each once, as
+    the page's first ones do when it comes up."""
+
+    def __init__(self, area: QScrollArea):
+        super().__init__(area)
+        self.area = area
+        self.seen: set[int] = set()
+        area.verticalScrollBar().valueChanged.connect(self.look)
+        area.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Show, QEvent.Resize):
+            self.mark_in_sight()
+        return False
+
+    def mark_in_sight(self) -> None:
+        """What shows without scrolling is the page's own coming in, not this."""
+        for frame in self.sections():
+            if self.top_of(frame) < self.area.viewport().height():
+                self.seen.add(id(frame))
+
+    def sections(self) -> list:
+        page = self.area.widget()
+        return [] if page is None else [f for f in page.findChildren(QFrame, 'section') if f.isVisibleTo(page)]
+
+    def top_of(self, frame) -> int:
+        return frame.mapTo(self.area.widget(), frame.rect().topLeft()).y() - self.area.verticalScrollBar().value()
+
+    def look(self, _value=None) -> None:
+        coming = []
+        bottom = self.area.viewport().height()
+        for frame in self.sections():
+            if id(frame) in self.seen:
+                continue
+            if self.top_of(frame) < bottom - 8:
+                self.seen.add(id(frame))
+                coming.append(frame)
+        if coming:
+            theme.stagger_in(coming, by=14, ms=theme.GENTLE + 60)
 
 
 class SettingsWindow(QWidget):
+    PAGES = [('gear', 'General'), ('palette', 'Appearance'), ('clock', 'Clock and weather'), ('grid', 'Widgets'),
+             ('info', 'About')]
+    WIDGETS_PAGE = 3
+
     def __init__(self, dock):
         super().__init__(None, Qt.Window)
         self.dock = dock
@@ -49,14 +123,10 @@ class SettingsWindow(QWidget):
         self.setWindowTitle('Dockline Settings')
         self.setWindowIcon(L.app_icon())
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.glass = dock.look.glass and not dock.testing
-        if self.glass:                               # see-through to Windows' blur, as the dock's glass
-            self.setAttribute(Qt.WA_TranslucentBackground)
-        self.restyle_later = QTimer(self)
-        self.restyle_later.setSingleShot(True)
-        self.restyle_later.setInterval(120)
-        self.restyle_later.timeout.connect(self.restyle)
-        self.resize(900, 720)
+        if not dock.testing:
+            theme.frost(self, backdrop=BACKDROP)      # the suite's glass, as Hanami's settings
+            theme.closes_on_escape(self)
+        self.resize(940, 680)
         self.page_index = 0
         self.picker = None
         self.found = _Found()
@@ -64,149 +134,150 @@ class SettingsWindow(QWidget):
         self.build()
 
     def build(self) -> None:
-        self.setObjectName('window')
-        self.restyle()
-        if self.layout() is not None:
-            QWidget().setLayout(self.layout())          # drop the old layout and its widgets
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        # the sidebar: everything Dockline has, in one place (the dock's menu opens the same pages)
-        side = QVBoxLayout()
-        side.setContentsMargins(16, 24, 8, 16)
-        side.setSpacing(16)
-        name = QLabel('Dockline')
-        name.setObjectName('title')
-        side.addWidget(name)
-        self.nav = QListWidget()
-        self.nav.setFixedWidth(170)
-        self.nav.addItems(['General', 'Widgets'])
-        side.addWidget(self.nav, 1)
-        outer.addLayout(side)
-        self.pages = QStackedWidget()
-        outer.addWidget(self.pages, 1)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.viewport().installEventFilter(theme._wheels())     # the suite's smooth wheel, here only
-        self.pages.addWidget(scroll)
-        from .picker import Picker
-        self.picker = Picker(self.dock, embedded=True)
-        self.pages.addWidget(self.picker)
-        self.nav.currentRowChanged.connect(self.show_page)
-        self.nav.setCurrentRow(self.page_index)
-        page = QWidget()
-        page.setObjectName('root')
-        scroll.setWidget(page)
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(16)
-        title = QLabel('General')
-        title.setObjectName('title')
-        layout.addWidget(title)
+        frame = suitesettings.SettingsFrame(self, L.app_icon().pixmap(28, 28))
+        self.frame = frame
+        self.nav, self.pages = frame.nav, frame.pages
+        self.reveals = []
+        for (mark, title), make in zip(self.PAGES, (self.general, self.appearance, self.clock_page, None,
+                                                    self.about)):
+            if make is None:
+                from .picker import Picker
+                self.picker = Picker(self.dock, embedded=True)
+                frame.add_widget(mark, title, self.picker)
+                continue
+            page, layout = suitesettings.page(title)
+            make(layout)
+            layout.addStretch(1)
+            area = suitesettings.scrolled(page)
+            self.reveals.append(_Reveal(area))
+            frame.add_widget(mark, title, area)
+        self.nav.chosen.connect(self.show_page)
 
-        cfg = self.cfg
-        appearance = self.section(layout, 'Appearance')
-        self.row(appearance, 'Style', _choice([(k, L.LOOKS[k].label) for k in L.STYLES], cfg['look'],
-                                              lambda v: self.set('look', v, 'look', rebuild=True)))
-        glass_note = QLabel('Glass transparency is set in Hanami: Settings > Appearance > Glass.')
-        glass_note.setObjectName('sub')
-        appearance.addWidget(glass_note)
-        self.row(appearance, 'Dock size', _choice([('S', 'Small'), ('M', 'Medium'), ('L', 'Large')], cfg['size'],
-                                                  lambda v: self.set('size', v, 'size')))
-        self.row(appearance, 'Position', _choice([('bottom', 'Bottom'), ('top', 'Top')], cfg['edge'],
-                                                 lambda v: self.set('edge', v, 'edge')))
+    # ------------------------------------------------------------------ pages
 
-        clock = self.section(layout, 'Clock and weather')
-        self.row(clock, 'Clock', _choice([(False, '12-hour'), (True, '24-hour')], cfg['clock24'],
-                                         lambda v: self.set('clock24', v, 'clock')))
-        self.row(clock, 'Temperature', _choice([(False, 'Celsius'), (True, 'Fahrenheit')], cfg['fahrenheit'],
-                                               lambda v: self.set('fahrenheit', v, 'weather')))
-        city_row = QHBoxLayout()
-        city_row.setSpacing(8)
-        self.city = QLineEdit(cfg['city'])
-        self.city.setPlaceholderText('City')
-        self.city.returnPressed.connect(self.find_city)
-        find = QPushButton('Set location')
-        find.setFocusPolicy(Qt.NoFocus)
-        find.clicked.connect(self.find_city)
-        city_row.addWidget(self.city, 1)
-        city_row.addWidget(find)
-        self.row(clock, 'Weather location', city_row)
-        self.city_note = QLabel('Weather data from Open-Meteo.' if cfg['latitude'] is None else
-                                f'Location: {cfg["city"]}')
-        self.city_note.setObjectName('sub')
-        clock.addWidget(self.city_note)
+    def general(self, layout: QVBoxLayout) -> None:
+        box_frame, box = section('Starting up')
+        self.switch(box, 'Start with Windows', 'startup', 'startup', 'Dockline starts when you sign in.')
+        layout.addWidget(box_frame)
 
-        system = self.section(layout, 'Windows')
-        self.hide_box = self.check(system, 'Hide the Windows taskbar', 'hide_taskbar', 'taskbar',
-                                   'The taskbar and its notification area are hidden while Dockline runs and '
-                                   'return when it quits.')
-        self.check(system, 'Hide the dock automatically', 'autohide', 'autohide',
-                   'The dock appears when the pointer reaches the edge of the screen, except over '
-                   'full-screen apps.')
-        self.check(system, 'Show the dock for alerts', 'alerts', 'alerts',
-                   'A hidden dock appears briefly when an app requests attention or a timer ends.')
-        self.check(system, 'Show the dock for notifications', 'alert_notices', 'alerts',
-                   'Applies to apps with notification banners on in Windows Settings.')
-        self.check(system, 'Start with Windows', 'startup', 'startup')
-        pins_row = QHBoxLayout()
-        import_pins = QPushButton('Import taskbar pins')
-        import_pins.setFocusPolicy(Qt.NoFocus)
-        import_pins.setCursor(Qt.PointingHandCursor)
-        pins_row.addWidget(import_pins)
-        pins_row.addStretch(1)
-        system.addLayout(pins_row)
-        pins_note = QLabel('Adds the apps pinned to the Windows taskbar to the dock. Programs and shortcuts '
-                           'dragged onto the dock are pinned too.')
-        pins_note.setObjectName('sub')
-        pins_note.setWordWrap(True)
-        system.addWidget(pins_note)
+        box_frame, box = section('The Windows taskbar')
+        self.hide_box = self.switch(box, 'Hide the Windows taskbar', 'hide_taskbar', 'taskbar',
+                                    'The taskbar and its notification area are hidden while Dockline runs and '
+                                    'return when it quits.')
+        self.switch(box, 'Hide the dock automatically', 'autohide', 'autohide',
+                    'The dock appears when the pointer reaches the edge of the screen, except over '
+                    'full-screen apps.')
+        self.switch(box, 'Show the dock for alerts', 'alerts', 'alerts',
+                    'A hidden dock appears briefly when an app requests attention or a timer ends.')
+        self.switch(box, 'Show the dock for notifications', 'alert_notices', 'alerts',
+                    'Applies to apps with notification banners on in Windows Settings.')
+        box.addWidget(note('On more than one display, Dockline follows the Windows taskbar settings '
+                           '"Show my taskbar on all displays" and "Show my taskbar apps on".'))
+        layout.addWidget(box_frame)
+
+        box_frame, box = section('Pinned apps')
+        pins_note = note('Adds the apps pinned to the Windows taskbar to the dock. Programs and shortcuts '
+                         'dragged onto the dock are pinned too.')
 
         def import_now():
             added = self.dock.import_taskbar_pins()
             pins_note.setText('No new pinned apps found on the Windows taskbar.' if added == 0 else
                               f'{added} pinned {"app" if added == 1 else "apps"} added to the dock.')
+        row = QHBoxLayout()
+        row.addWidget(_button('Import taskbar pins', import_now))
+        row.addStretch(1)
+        box.addLayout(row)
+        box.addWidget(pins_note)
+        layout.addWidget(box_frame)
 
-        import_pins.clicked.connect(import_now)
-        displays = QLabel('On more than one display, Dockline follows the Windows taskbar settings '
-                          '"Show my taskbar on all displays" and "Show my taskbar apps on".')
-        displays.setObjectName('sub')
-        displays.setWordWrap(True)
-        system.addWidget(displays)
+        box_frame, box = section('Backup')
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(_button('Export settings', self.export_settings))
+        row.addWidget(_button('Import settings', self.import_settings))
+        row.addStretch(1)
+        box.addLayout(row)
+        self.backup_note = note('Includes the widgets and their order, pinned apps, style, AI preferences, '
+                                'weather location and notes.')
+        box.addWidget(self.backup_note)
+        layout.addWidget(box_frame)
 
-        backup = self.section(layout, 'Backup')
-        backup_row = QHBoxLayout()
-        backup_row.setSpacing(8)
-        for words, slot in (('Export settings', self.export_settings), ('Import settings', self.import_settings)):
-            button = QPushButton(words)
-            button.setFocusPolicy(Qt.NoFocus)
-            button.setCursor(Qt.PointingHandCursor)
-            button.clicked.connect(slot)
-            backup_row.addWidget(button)
-        backup_row.addStretch(1)
-        backup.addLayout(backup_row)
-        self.backup_note = QLabel('Includes the widgets and their order, pinned apps, style, AI preferences, '
-                                  'weather location and notes.')
-        self.backup_note.setObjectName('sub')
-        self.backup_note.setWordWrap(True)
-        backup.addWidget(self.backup_note)
+    def appearance(self, layout: QVBoxLayout) -> None:
+        cfg = self.cfg
+        box_frame, box = section('The dock')
+        rows = _Rows()
+        rows.addRow(label('Style'), self.choice([(k, L.LOOKS[k].label) for k in L.STYLES], cfg['look'],
+                                                lambda v: self.set('look', v, 'look')))
+        rows.addRow(label('Size'), self.choice([('S', 'Small'), ('M', 'Medium'), ('L', 'Large')], cfg['size'],
+                                               lambda v: self.set('size', v, 'size')))
+        rows.addRow(label('Position'), self.choice([('bottom', 'Bottom'), ('top', 'Top')], cfg['edge'],
+                                                   lambda v: self.set('edge', v, 'edge')))
+        box.addLayout(rows)
+        box.addWidget(note('Glass transparency, light or dark, and animations are set for the whole suite in '
+                           'Hanami: Settings > Appearance.'))
+        layout.addWidget(box_frame)
 
-        about = self.section(layout, 'About')
-        version = QLabel(f'Dockline {__version__}')
-        about.addWidget(version)
-        quit_row = QHBoxLayout()
-        quit_button = QPushButton('Quit Dockline')
-        quit_button.setFocusPolicy(Qt.NoFocus)
-        quit_button.clicked.connect(QApplication.instance().quit)
-        quit_row.addWidget(quit_button)
-        quit_row.addStretch(1)
-        about.addLayout(quit_row)
-        note = QLabel('Right-click the dock to add widgets, move it or quit. Drag the dock by an empty spot to '
-                      'move it between the top and bottom of the screen.')
-        note.setObjectName('sub')
-        note.setWordWrap(True)
-        about.addWidget(note)
-        layout.addStretch(1)
+    def clock_page(self, layout: QVBoxLayout) -> None:
+        cfg = self.cfg
+        box_frame, box = section('Clock')
+        rows = _Rows()
+        rows.addRow(label('Clock'), self.choice([(False, '12-hour'), (True, '24-hour')], cfg['clock24'],
+                                                lambda v: self.set('clock24', v, 'clock')))
+        rows.addRow(label('Temperature'), self.choice([(False, 'Celsius'), (True, 'Fahrenheit')], cfg['fahrenheit'],
+                                                      lambda v: self.set('fahrenheit', v, 'weather')))
+        box.addLayout(rows)
+        layout.addWidget(box_frame)
+
+        box_frame, box = section('Weather location')
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.city = QLineEdit(cfg['city'])
+        self.city.setPlaceholderText('City')
+        self.city.returnPressed.connect(self.find_city)
+        row.addWidget(self.city, 1)
+        row.addWidget(_button('Set location', self.find_city))
+        box.addLayout(row)
+        self.city_note = note('Weather data from Open-Meteo.' if cfg['latitude'] is None else
+                              f'Location: {cfg["city"]}')
+        box.addWidget(self.city_note)
+        layout.addWidget(box_frame)
+
+    def about(self, layout: QVBoxLayout) -> None:
+        box_frame, box = section('')
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        logo = theme.Label()
+        logo.setPixmap(L.app_icon().pixmap(64, 64))
+        row.addWidget(logo, 0, Qt.AlignTop)
+        words = QVBoxLayout()
+        words.setSpacing(16)
+        words.addWidget(suitesettings.heading(f'Dockline {__version__}', 17))
+        words.addWidget(label('Right-click the dock to add widgets, move it or quit. Drag the dock by an empty '
+                              'spot to move it between the top and bottom of the screen.', SMALL, role='dim',
+                              wrap=True))
+        buttons = QHBoxLayout()
+        buttons.addWidget(_button('Quit Dockline', QApplication.instance().quit))
+        buttons.addStretch(1)
+        words.addLayout(buttons)
+        row.addLayout(words, 1)
+        box.addLayout(row)
+        layout.addWidget(box_frame)
+
+    # ------------------------------------------------------------------ parts
+
+    def choice(self, options, current, changed) -> QWidget:
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(_choice(options, current, changed))
+        row.addStretch(1)
+        return holder
+
+    def switch(self, box: QVBoxLayout, words: str, key: str, what: str, about: str = '') -> QCheckBox:
+        holder, check = switch(words, about, bool(self.cfg[key]))
+        check.toggled.connect(lambda on: self.set(key, on, what))
+        box.addWidget(holder)
+        return check
 
     def export_settings(self) -> None:
         from pathlib import Path
@@ -240,66 +311,20 @@ class SettingsWindow(QWidget):
         self.dock.settings_imported()
         QTimer.singleShot(0, self.reopen)                # the window shows the imported settings
 
-    def section(self, layout: QVBoxLayout, title: str) -> QVBoxLayout:
-        heading = QLabel(title)
-        heading.setObjectName('heading')
-        layout.addWidget(heading)
-        frame = QFrame()
-        frame.setObjectName('section')
-        inner = QVBoxLayout(frame)
-        inner.setContentsMargins(16, 16, 16, 16)
-        inner.setSpacing(16)
-        layout.addWidget(frame)
-        return inner
-
-    def row(self, section: QVBoxLayout, label: str, control) -> None:
-        box = QVBoxLayout()
-        box.setSpacing(8)
-        name = QLabel(label)
-        box.addWidget(name)
-        if isinstance(control, QWidget):
-            box.addWidget(control)
-        else:
-            box.addLayout(control)
-        section.addLayout(box)
-
-    def check(self, section: QVBoxLayout, label: str, key: str, what: str, line: str = '') -> QCheckBox:
-        box = QCheckBox(label)
-        box.setChecked(bool(self.cfg[key]))
-        box.setCursor(Qt.PointingHandCursor)
-        box.toggled.connect(lambda on: self.set(key, on, what))
-        section.addWidget(box)
-        if line:
-            note = QLabel(line)
-            note.setObjectName('sub')
-            note.setWordWrap(True)
-            section.addWidget(note)
-        return box
-
-    def restyle(self) -> None:
-        """The dock's style, now (and its glass's tint)."""
-        self.setStyleSheet(L.settings_css(self.dock.look, self.dock.glass_percent()))
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if not self.dock.testing:
-            from . import win
-            win.framed_look(int(self.winId()), self.dock.look.dark, self.glass)
-
-    def set(self, key: str, value, what: str, rebuild: bool = False) -> None:
+    def set(self, key: str, value, what: str) -> None:
         if self.cfg[key] == value:
             return
         self.cfg[key] = value
         self.dock.changed(what)
-        if key == 'look':                            # a new style: the window is made again in it
-            QTimer.singleShot(0, self.reopen)
-        elif rebuild:
-            self.build()
+        if key == 'look' and self.picker is not None:      # the widgets' previews, in the new style
+            self.picker.samples.clear()
+            if self.page_index == self.WIDGETS_PAGE:
+                self.picker.refresh()
 
     def reopen(self) -> None:
-        where, page = self.geometry(), ('general', 'widgets')[self.page_index]
+        where, page = self.geometry(), self.PAGES[self.page_index][1]
         self.close()
-        self.dock.open_settings(page)
+        self.dock.open_settings(page.lower())
         if self.dock.settings_window is not None:
             self.dock.settings_window.setGeometry(where)
 
@@ -341,17 +366,16 @@ class SettingsWindow(QWidget):
             pass                                       # the window closed meanwhile
 
     def show_page(self, index: int) -> None:
-        """General or Widgets. On Widgets, the dock shows its remove badges, as with the picker."""
+        """On Widgets, the dock shows its remove badges, as with the picker."""
         self.page_index = max(0, index)
-        self.pages.setCurrentIndex(self.page_index)
-        widgets = self.page_index == 1
+        widgets = self.page_index == self.WIDGETS_PAGE
         self.dock.picker = self.picker if widgets else None
         self.dock.set_editing(widgets)
         if widgets:
             self.picker.refresh()
 
     def open_page(self, name: str) -> None:
-        self.nav.setCurrentRow({'general': 0, 'widgets': 1}.get(name, 0))
+        self.frame.open_page(name)              # 'general', 'widgets', or any page's title
 
     def closeEvent(self, event):
         self.dock.picker = None

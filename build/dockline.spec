@@ -22,9 +22,10 @@ a = Analysis(
     [os.path.join(app_dir, 'main.py')],
     pathex=[app_dir],
     binaries=qt_plugin_binaries,
-    datas=[],
+    datas=[(os.path.join(app_dir, 'dockline', name), 'dockline')        # Settings' Geist Serif titles and faint blossom, as Hanami's
+           for name in ('GeistSerif-Regular.ttf', 'GeistSerif-OFL.txt', 'backdrop.jpg')],
     hiddenimports=['dockline', 'dockline.app', 'dockline.dock', 'dockline.widgets', 'dockline.picker', 'dockline.glassfix',
-                   'dockline.settings_window', 'dockline.media', 'dockline.ai', 'PySide6.QtNetwork',
+                   'dockline.settings_window', 'dockline.suitesettings', 'dockline.suiteicons', 'PySide6.QtSvg', 'dockline.media', 'dockline.ai', 'PySide6.QtNetwork',
                    'winrt.runtime', 'winrt.system', 'winrt.windows.foundation',
                    'winrt.windows.foundation.collections', 'winrt.windows.media.control',
                    'winrt.windows.storage.streams'],
