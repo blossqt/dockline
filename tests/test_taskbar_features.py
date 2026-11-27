@@ -184,6 +184,22 @@ class DockTests(Temp):
         self.assertFalse(carousel.pages[1].buttons['next'].isEnabled())
         tile.card.close()
 
+    def test_clock_card_shows_seconds(self):
+        """The clock's card has the time with seconds, kept current while it is open."""
+        dock = self.make()
+        tile = next(t for t in dock.tiles if t.ID == 'clock')
+        tile.click(tile.rect().center())
+        self.assertRegex(tile.big.text(), r'^\d{1,2}:\d\d:\d\d [AP]M$')
+        self.assertTrue(tile.seconds.isActive())
+        self.assertLessEqual(tile.seconds.remainingTime(), 1005)
+        dock.cfg['clock24'] = True
+        tile.next_second()
+        self.assertRegex(tile.big.text(), r'^\d\d:\d\d:\d\d$')
+        tile.card.close()
+        tile.card_closed()
+        self.assertIsNone(tile.big)
+        self.assertFalse(tile.seconds.isActive())
+
     def test_closed_card_is_deleted_by_qt_alone(self):
         import shiboken6
         from dockline.card import Card

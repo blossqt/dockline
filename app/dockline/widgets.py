@@ -2961,13 +2961,32 @@ class ClockTile(Tile):
     ABOUT = 'The time and date, in 12- or 24-hour format. A click shows the month.'
     WIDTH = 2.15
 
+    def setup(self):
+        self.big = None                          # the open card's time, with seconds
+        self.seconds = QTimer(self)
+        self.seconds.setSingleShot(True)
+        self.seconds.setTimerType(Qt.PreciseTimer)
+        self.seconds.timeout.connect(self.next_second)
+
     def tick(self):
         self.update()
 
-    def time_text(self, now: dt.datetime) -> str:
+    def time_text(self, now: dt.datetime, seconds: bool = False) -> str:
         if self.dock.cfg['clock24']:
-            return now.strftime('%H:%M')
-        return now.strftime('%I:%M %p').lstrip('0')
+            return now.strftime('%H:%M:%S' if seconds else '%H:%M')
+        return now.strftime('%I:%M:%S %p' if seconds else '%I:%M %p').lstrip('0')
+
+    def next_second(self):
+        """The card's clock turns over as each second does: woken just after it begins."""
+        if self.big is None:
+            return
+        now = dt.datetime.now()
+        try:
+            self.big.setText(self.time_text(now, True))
+        except RuntimeError:
+            self.big = None
+            return
+        self.seconds.start(1000 - now.microsecond // 1000 + 5)
 
     def paint(self, painter, rect, look):
         now = dt.datetime.now()
@@ -2979,6 +2998,8 @@ class ClockTile(Tile):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
         now = dt.datetime.now()
+        self.big = _label(self.time_text(now, True), 'big')
+        layout.addWidget(self.big)
         layout.addWidget(_label(f'{now:%A}, {now:%B} {now.day}, {now.year}', 'title'))
         month = _Month(self.look)
         header = QHBoxLayout()
@@ -2990,6 +3011,19 @@ class ClockTile(Tile):
         layout.addLayout(header)
         layout.addWidget(month, 0, Qt.AlignHCenter)
         self.open_card(content, 7 * 38 + 2 * 16 + 2)
+        if self.card:
+            self.next_second()
+        else:
+            self.big = None
+
+    def card_closed(self):
+        self.big = None
+        self.seconds.stop()
+        super().card_closed()
+
+    def retire(self):
+        self.big = None
+        self.seconds.stop()
 
 
 # ================================================================ Weather
