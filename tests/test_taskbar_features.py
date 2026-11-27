@@ -1134,6 +1134,32 @@ class TrayOpeningTests(unittest.TestCase):
             win.open_start()
             self.assertEqual(pressed, [(win.VK_LWIN,)])
 
+    def test_shell_buttons_work_over_an_administrators_window(self):
+        """Search, notifications, Task View and Task Manager press their keys as before, and take
+        another way only while an administrator's window in front would drop them. Show desktop
+        always asks the taskbar."""
+        from unittest import mock
+        pressed, opened, posted, dropped = [], [], [], [False]
+        with mock.patch.object(win, 'keys_dropped', lambda: dropped[0]), \
+                mock.patch.object(win, 'press', lambda *keys: pressed.append(keys)), \
+                mock.patch.object(win, 'shell_open', lambda what, *a: opened.append(what) or True), \
+                mock.patch.object(win.user32, 'FindWindowW', lambda cls, title: 77), \
+                mock.patch.object(win.user32, 'PostMessageW', lambda *a: posted.append(a) or 1):
+            actions = (win.windows_search, win.notification_center, win.task_view, win.task_manager)
+            for action in actions:
+                action()
+            self.assertEqual(len(pressed), 4)
+            self.assertEqual(opened, [])
+            dropped[0] = True
+            for action in actions:
+                action()
+            self.assertEqual(len(pressed), 4)
+            self.assertEqual(opened, ['ms-search:', 'ms-actioncenter:',
+                                      'shell:::{3080F90E-D7AD-11D9-BD98-0000947B0257}', 'taskmgr.exe'])
+            win.show_desktop()
+            self.assertEqual(posted, [(77, 0x0111, 407, 0)])
+            self.assertEqual(len(pressed), 4)
+
 class WindowsTests(unittest.TestCase):
     """Reads only: nothing on screen changes."""
 

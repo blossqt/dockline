@@ -1384,7 +1384,7 @@ class SearchTile(Tile):
 
     def click(self, pos):
         if not self.dock.testing:
-            win.press(win.VK_LWIN, ord('S'))           # Windows' own search, as the taskbar's button opens
+            win.windows_search()                       # Windows' own search, as the taskbar's button opens
 
 
 class RecycleTile(Tile):
@@ -1597,7 +1597,7 @@ class QuickSettingsTile(Tile):
         L.glyph(painter, rect, 'toggles', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.press(win.VK_LWIN, ord('A'))
+        win.quick_settings()
 
 
 class NotificationsTile(Tile):
@@ -1608,7 +1608,7 @@ class NotificationsTile(Tile):
         L.glyph(painter, rect, 'bell', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.press(win.VK_LWIN, ord('N'))
+        win.notification_center()
 
 
 class TaskViewTile(Tile):
@@ -1619,7 +1619,7 @@ class TaskViewTile(Tile):
         L.glyph(painter, rect, '\ue7c4', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.press(win.VK_LWIN, 0x09)                 # Win+Tab
+        win.task_view()
 
 
 class TrayTile(Tile):
@@ -1738,7 +1738,7 @@ class ShowDesktopTile(Tile):
         L.glyph(painter, rect, 'desktop', look.c(look.text), rect.height() * 0.36)
 
     def click(self, pos):
-        win.press(win.VK_LWIN, ord('D'))
+        win.show_desktop()
 
 
 class KeyboardTile(Tile):

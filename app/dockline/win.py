@@ -668,10 +668,88 @@ def open_start() -> None:
         press(VK_LWIN)
 
 
+advapi32 = ctypes.WinDLL('advapi32', use_last_error=True)
+advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+                                         ctypes.POINTER(wintypes.DWORD)]
+TOKEN_QUERY, TOKEN_ELEVATION = 0x0008, 20
+
+
+def elevated(pid: int) -> bool:
+    """A program runs as administrator. Any program may ask this of another, admin or not."""
+    handle = kernel32.OpenProcess(0x1000, False, pid)        # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return False
+    try:
+        token = wintypes.HANDLE()
+        if not advapi32.OpenProcessToken(handle, TOKEN_QUERY, ctypes.byref(token)):
+            return False
+        try:
+            value, size = wintypes.DWORD(), wintypes.DWORD()
+            if not advapi32.GetTokenInformation(token, TOKEN_ELEVATION, ctypes.byref(value), 4, ctypes.byref(size)):
+                return False
+            return bool(value.value)
+        finally:
+            kernel32.CloseHandle(token)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+_self_elevated: bool | None = None
+
+
+def keys_dropped() -> bool:
+    """Keys the dock sends would be dropped: Windows keeps an ordinary program's keys from a window
+    running as administrator (Task Manager, as a rule), and that window is in front."""
+    global _self_elevated
+    if _self_elevated is None:
+        _self_elevated = elevated(os.getpid())
+    front = foreground()
+    return bool(front) and not _self_elevated and elevated(window_pid(front))
+
+
+def _keys_or(keys: tuple[int, ...], other) -> None:
+    """Press keys as before; the other way only while they would be dropped, or if it fails."""
+    if not keys_dropped() or not other():
+        press(*keys)
+
+
 def task_manager() -> None:
     """Open Task Manager as the taskbar's menu does: Ctrl+Shift+Esc, which Windows answers itself, so
-    no elevation prompt and no second copy if it is open already."""
-    press(VK_CONTROL, VK_SHIFT, VK_ESCAPE)
+    no elevation prompt and no second copy if it is open already. While an administrator's window is in
+    front, Task Manager is started instead, which brings an open one forward, again with no prompt."""
+    _keys_or((VK_CONTROL, VK_SHIFT, VK_ESCAPE), lambda: shell_open('taskmgr.exe'))
+
+
+def show_desktop() -> None:
+    """Minimise every window, or bring them back, as Win+D does: asked of the taskbar, which answers
+    whatever is in front."""
+    tray = user32.FindWindowW('Shell_TrayWnd', None)
+    if not tray or not user32.PostMessageW(tray, 0x0111, 407, 0):     # WM_COMMAND, show the desktop
+        press(VK_LWIN, ord('D'))
+
+
+def task_view() -> None:
+    _keys_or((VK_LWIN, 0x09), lambda: shell_open('shell:::{3080F90E-D7AD-11D9-BD98-0000947B0257}'))
+
+
+def notification_center() -> None:
+    _keys_or((VK_LWIN, ord('N')), lambda: shell_open('ms-actioncenter:'))
+
+
+def windows_search() -> None:
+    _keys_or((VK_LWIN, ord('S')), lambda: shell_open('ms-search:'))
+
+
+def quick_settings() -> None:
+    """Win+A. Windows has no other way to open quick settings, so while an administrator's window is in
+    front the taskbar is made the active window first (allowed, as the dock was just clicked), and
+    the keys then reach Windows."""
+    if keys_dropped():
+        tray = user32.FindWindowW('Shell_TrayWnd', None)
+        if tray:
+            activate(tray)
+    press(VK_LWIN, ord('A'))
 
 
 def press(*keys: int) -> None:
