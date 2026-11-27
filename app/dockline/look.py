@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QColor, QFont, QFontDatabase, QIcon, QPainter,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QFontMetricsF, QIcon, QPainter,
                            QPainterPath, QPen, QPixmap)
 
 # Neutral colours (the person's wish): white on dark and near-black on light for what is chosen,
@@ -191,6 +191,9 @@ def text(painter: QPainter, rect: QRectF, value: str, color: QColor, pixels: flo
     painter.setFont(font(pixels, weight))
     metrics = painter.fontMetrics()
     shown = metrics.elidedText(value, Qt.ElideRight, int(rect.width()))
+    # centred in its height by its letters, not its line's box (suitetheme.baseline)
+    from . import suitetheme
+    rect, align = suitetheme.line_rect(QFontMetricsF(painter.font()), QRectF(rect), align, shown)
     _halo(painter, rect, align, shown)
     painter.setPen(color)
     painter.drawText(rect, align, shown)

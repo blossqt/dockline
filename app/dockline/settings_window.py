@@ -58,7 +58,7 @@ class _Rows(QGridLayout):
 
     def addRow(self, name, field) -> None:
         row = self.rowCount()
-        self.addWidget(name, row, 0, Qt.AlignLeft | Qt.AlignVCenter)
+        self.addWidget(name, row, 0, Qt.AlignLeft)        # the row's height: its letters centred (theme.Label)
         self.addWidget(field, row, 1, Qt.AlignVCenter)
 
 
