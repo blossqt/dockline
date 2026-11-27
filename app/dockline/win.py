@@ -740,7 +740,7 @@ def windows_search() -> None:
 def through_notification_center(keys: tuple[int, ...], later) -> None:
     """Keys with no other way in (Win+A, Win+Tab), while an administrator's window in front would drop
     them: the notification center is opened first (that needs no keys), and once it, not that window,
-    is in front the keys reach Windows. later(ms, step) runs step after ms."""
+    is in front the keys reach Windows, about 0.15 s after the click. later(ms, step) runs step after ms."""
     if not keys_dropped() or not shell_open('ms-actioncenter:'):
         press(*keys)
         return
@@ -751,7 +751,7 @@ def through_notification_center(keys: tuple[int, ...], later) -> None:
         if keys_dropped() and tries[0] < 60:           # in front within ~30 ms here; up to a second
             later(16, wait)
         elif not keys_dropped():
-            later(400, lambda: press(*keys))           # its slide-in first, or the keys are lost
+            later(100, lambda: press(*keys))           # a margin: none was needed here (18 of 18)
 
     later(16, wait)
 
