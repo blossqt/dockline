@@ -492,6 +492,65 @@ class DockTests(Temp):
         self.assertEqual(len(strip.display()), 2)
         dock.hide()
 
+    def test_one_click_closes_start_and_opens_the_app(self):
+        """Start was in front when an app was clicked: Esc goes to Start alone, and the app opens only
+        once Windows has hidden Start (opened sooner, it stayed behind Start), or after waiting at most."""
+        import time
+        from unittest import mock
+        from dockline import widgets
+        source = some_shortcut()
+        dock = self.make()
+        dock.cfg['pinned'] = [str(source)]
+        dock.show()
+        strip = self.apps(dock)
+        strip.refresh()
+        START = 777
+        state = {'gone': False}
+        escaped, started, activated = [], [], []
+
+        def settle(until):
+            end = time.monotonic() + until
+            while time.monotonic() < end:
+                APP.processEvents()
+                time.sleep(0.005)
+
+        with mock.patch.object(win, 'foreground', lambda: START), \
+                mock.patch.object(win, 'shell_panel', lambda hwnd: hwnd if hwnd == START else 0), \
+                mock.patch.object(win, 'dismiss_shell', lambda front: escaped.append(front) or True), \
+                mock.patch.object(win, 'shell_gone', lambda hwnd: state['gone']), \
+                mock.patch.object(win, 'activate', activated.append), \
+                mock.patch.object(widgets, '_open', started.append):
+            dock.testing = False
+            try:
+                point = strip.rects()[0].center().toPoint()
+                strip.front_at_press = win.foreground()
+                strip.click(point)
+                self.assertEqual(escaped, [START])
+                settle(0.08)
+                self.assertEqual(started, [])                     # Start still showing: not yet
+                state['gone'] = True
+                settle(0.08)
+                self.assertEqual(started, [str(source)])
+                self.assertIn(strip.keys[0], strip.launches)
+                # Start never reported hidden: the app still opens, after SHELL_GONE_MOST
+                started.clear()
+                escaped.clear()
+                state['gone'] = False
+                strip.click(point)
+                settle(0.2)
+                self.assertEqual(started, [])
+                settle(0.5)
+                self.assertEqual(started, [str(source)])
+                # Start not in front: straight away, no Esc
+                started.clear()
+                escaped.clear()
+                strip.front_at_press = 0
+                strip.click(point)
+                self.assertEqual((escaped, started), ([], [str(source)]))
+            finally:
+                dock.testing = True
+        dock.hide()
+
     def test_started_app_hops_and_breathes_until_its_window_shows(self):
         from dockline import motion, widgets
         self.moving()

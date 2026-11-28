@@ -1092,6 +1092,24 @@ class Dock(QWidget):
         QTimer.singleShot(SHELL_FADE_MS, loop.quit)
         loop.exec()
 
+    def after_shell(self, front: int, step) -> None:
+        """Start or Search was in front when an app was clicked: Windows will not let the dock bring
+        anything over it, and a window or app opened then stays behind it or loses the front again as
+        it closes. So it is closed first (Esc, while it is still in front) and step runs once Windows
+        has hidden it, about 0.17 s later: one click both closes Start and opens the app."""
+        if not win.dismiss_shell(front):
+            step()
+            return
+        until = time.monotonic() + SHELL_GONE_MOST
+
+        def wait():
+            if win.shell_gone(front) or time.monotonic() >= until:
+                step()
+            else:
+                QTimer.singleShot(10, wait)
+
+        QTimer.singleShot(10, wait)
+
     def set_hide_taskbar(self, on: bool) -> None:
         self.cfg['hide_taskbar'] = on
         self.cfg.save()
