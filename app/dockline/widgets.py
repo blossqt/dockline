@@ -791,13 +791,17 @@ class AppsTile(Tile):
             program = shortcuts.program_of(path)
             if program and program != path.lower() and not shortcuts.web_app(path):
                 program_pins.setdefault(program, path.lower())
+        apps = self.app_ids_apart(windows)
         for window in windows:
             key = (window.path or f'window:{window.hwnd}').lower()
-            if key not in groups:
+            app_id = apps.get(window.hwnd, '')
+            if app_id:                            # one of several apps in one program: a tile of its own
+                key = f'{key}|{app_id.lower()}'
+            elif key not in groups:
                 key = program_pins.get(key, key)
             group = groups.get(key)
             if group is None:
-                group = groups[key] = win.Group(window.path)
+                group = groups[key] = win.Group(window.path, app_id=app_id)
             group.windows.append(window)
         # the order the person arranged, then pinned apps, then newly opened ones at the end
         keys = [key for key in self.order if key in groups]
@@ -830,42 +834,85 @@ class AppsTile(Tile):
 
     ICON = 0.62                  # an icon's share of its tile
 
-    def icon_for(self, group: win.Group) -> QPixmap | None:
-        """One sharp icon per app, at its largest magnified size; drawn smaller as needed."""
+    @staticmethod
+    def app_ids_apart(windows: list) -> dict[int, str]:
+        """The windows of one program that belong to apps of their own, as the taskbar tells them
+        apart (by AppUserModelID): Overwolf's apps all run as Overwolf.exe. The app most of the
+        program's windows give stays on the program's tile; each other one gets its own."""
+        try:
+            ids = win.window_app_ids(windows)
+        except OSError:
+            return {}
+        by_path: dict[str, list] = {}
+        for window in windows:
+            by_path.setdefault(window.path.lower(), []).append(window)
+        apart: dict[int, str] = {}
+        for same in by_path.values():
+            names = [ids.get(w.hwnd, '') for w in same]
+            if len(set(names)) < 2:
+                continue
+            main = max(dict.fromkeys(names), key=names.count)
+            for window, name in zip(same, names):
+                if name and name != main:
+                    apart[window.hwnd] = name
+        return apart
+
+    def icon_key(self, group: win.Group) -> str:
         key = group.path.lower() or f'window:{group.windows[0].hwnd if group.windows else 0}'
+        return f'{key}|{group.app_id.lower()}' if group.app_id else key
+
+    def icon_for(self, group: win.Group) -> QPixmap | None:
+        """One sharp icon per app, at its largest magnified size; drawn smaller as needed. Where the
+        taskbar would take it from, in order: a Store app's package; for a pin, the file its shortcut
+        names for its icon; the program file's own icon, unless the app's windows show another (an
+        app inside another program, as Overwolf's) or the file has only a placeholder (Ask's), when
+        an .ico shipped beside it or the window's own icon is the real one; the shell's blank one last,
+        looked at again a few times in case a window gives its icon a little later."""
+        key = self.icon_key(group)
         if key in self.icons:
             retry = self.blank_icons.get(key)
             if retry is None or time.monotonic() < retry[0] or not group.windows:
                 return self.icons[key]
-            del self.icons[key]            # it showed the blank picture: its window may have its icon by now
+            del self.icons[key]
         ratio = self.devicePixelRatioF()
         size = round(self.dock.tile_height * motion.MAGNIFY * self.ICON)
-        pixmap = None
+        pixels = round(size * ratio)
+        pixmap, blank = None, False
         app_id, packaged = win.app_id_of(group.windows[0]) if group.windows else ('', False)
-        if packaged:                                     # a Store app: its package's logo, as the taskbar shows
-            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
-        own = bool(group.path) and win.has_own_icon(group.path)
-        if pixmap is None and own:                       # the shell's large icon is sharper than a window's
-            icon = self.provider.icon(QFileInfo(group.path))
+        if group.app_id:
+            app_id, packaged = group.app_id, False
+        if packaged:
+            pixmap = self.app_id_pixmap(app_id, pixels)
+        path = group.path
+        if pixmap is None and path.lower().endswith('.lnk'):
+            pixmap, path = self.shortcut_icon(path, size, ratio)
+        if pixmap is None and app_id and not packaged and group.windows:
+            # An app that names itself apart from its program: its Start entry's icon if it has one,
+            # as the taskbar shows; with none (an Overwolf app), its window's, if that is a large one.
+            listed = self.app_id_pixmap(app_id, pixels)
+            if group.app_id:
+                pixmap = listed
+            if listed is None:
+                pixmap = self.windows_icon(group, at_least=48)
+        if pixmap is None and path and win.has_own_icon(path):
+            icon = self.provider.icon(QFileInfo(path))
             found = icon.pixmap(QSize(size, size), ratio)
             if not found.isNull() and found.width() >= size * ratio * 0.5:
                 pixmap = found
-            if pixmap is not None and group.windows and small_only(icon):
-                # A file with only a small icon (often the stock placeholder a build tool puts in) gives up
-                # nothing in sharpness to an icon the window set itself, which is then the app's real one.
-                handle = win.window_set_icon(group.windows[0].hwnd)
-                image = QImage.fromHICON(handle) if handle else QImage()
-                if not image.isNull():
-                    pixmap = QPixmap.fromImage(image)
+            if pixmap is not None and small_only(icon):  # often a build tool's placeholder
+                better = self.file_pixmap(win.icon_beside(path, _theme.is_dark()), 0, size, ratio)
+                if better is not None and better.width() >= pixels * 0.75:
+                    pixmap = better
+                elif group.windows:
+                    own = self.windows_icon(group, set_only=True)
+                    if own is not None:
+                        pixmap = own
+                    else:
+                        blank = True                     # its window may give its real icon soon
         if pixmap is None and group.windows:
-            handle = win.window_icon(group.windows[0].hwnd)
-            if handle:
-                image = QImage.fromHICON(handle)
-                if not image.isNull():
-                    pixmap = QPixmap.fromImage(image)
+            pixmap = self.windows_icon(group)
         if pixmap is None and app_id and not packaged:   # a program whose icon is on its Start shortcut
-            pixmap = self.app_id_pixmap(app_id, round(size * ratio))
-        blank = False
+            pixmap = self.app_id_pixmap(app_id, pixels)
         if pixmap is None and group.path:                # the shell's own, blank as it may be
             found = self.provider.icon(QFileInfo(group.path)).pixmap(QSize(size, size), ratio)
             if not found.isNull():
@@ -876,6 +923,48 @@ class AppsTile(Tile):
         if pixmap is not None and (group.windows or group.pinned):
             self.icons[key] = pixmap
         return pixmap
+
+    def windows_icon(self, group: win.Group, set_only: bool = False, at_least: int = 0) -> QPixmap | None:
+        """The first icon any of the app's windows shows (set_only: one it was given itself, not its
+        class's), if it is at least at_least pixels wide."""
+        for window in group.windows:
+            handle = win.window_set_icon(window.hwnd) if set_only else win.window_icon(window.hwnd)
+            if not handle:
+                continue
+            image = QImage.fromHICON(handle)
+            if not image.isNull() and image.width() >= at_least:
+                return QPixmap.fromImage(image)
+        return None
+
+    @staticmethod
+    def file_pixmap(path: str, index: int, size: int, ratio: float) -> QPixmap | None:
+        """Icon number index of a program, library or .ico file, drawn at the size asked."""
+        if not path or not os.path.exists(path):
+            return None
+        handle = win.file_icon(path, index, round(size * ratio))
+        if not handle:
+            return None
+        try:
+            image = QImage.fromHICON(handle)
+        finally:
+            win.destroy_icon(handle)
+        if image.isNull():
+            return None
+        pixmap = QPixmap.fromImage(image)
+        pixmap.setDevicePixelRatio(ratio)
+        return pixmap
+
+    def shortcut_icon(self, path: str, size: int, ratio: float) -> tuple[QPixmap | None, str]:
+        """A pin's icon from the file its shortcut takes it from, drawn large and without the shell's
+        shortcut arrow; else (None, the file to take it from instead: its target, or itself)."""
+        shortcut = shortcuts.read(path)
+        pixmap = self.file_pixmap(shortcut.icon, shortcut.icon_index, size, ratio)
+        if pixmap is not None:
+            return pixmap, path
+        target = shortcuts.program_of(path)
+        if target and os.path.exists(target):
+            return None, target
+        return None, path
 
     SIZED_KEPT = 160
 

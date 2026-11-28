@@ -28,6 +28,8 @@ class Shortcut:
     target: str = ''          # the program or file it starts, '' when it names none (a Store app)
     arguments: str = ''
     working_dir: str = ''
+    icon: str = ''            # the file its icon is taken from (environment variables expanded), if it names one
+    icon_index: int = 0
 
 
 def _cstring(data: bytes, at: int, wide: bool) -> str:
@@ -45,6 +47,7 @@ def parse(data: bytes, path: str = '') -> Shortcut:
     if len(data) < 0x4C or struct.unpack_from('<I', data, 0)[0] != 0x4C:
         raise ValueError('not a shortcut')
     flags = struct.unpack_from('<I', data, 20)[0]
+    icon_index = struct.unpack_from('<i', data, 0x38)[0]
     at = 0x4C
     if flags & HAS_ID_LIST:
         at += 2 + struct.unpack_from('<H', data, at)[0]
@@ -80,7 +83,9 @@ def parse(data: bytes, path: str = '') -> Shortcut:
         at += size
     if not target and flags & HAS_RELATIVE_PATH and path:
         target = os.path.normpath(os.path.join(os.path.dirname(path), strings[HAS_RELATIVE_PATH]))
-    return Shortcut(path, target, strings.get(HAS_ARGUMENTS, '').strip(), strings.get(HAS_WORKING_DIR, ''))
+    icon = os.path.expandvars(strings.get(HAS_ICON_LOCATION, '').strip().strip('"'))
+    return Shortcut(path, target, strings.get(HAS_ARGUMENTS, '').strip(), strings.get(HAS_WORKING_DIR, ''),
+                    icon, icon_index if icon else 0)
 
 
 @lru_cache(maxsize=256)

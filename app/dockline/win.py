@@ -280,6 +280,7 @@ class Group:
     path: str
     windows: list[Window] = field(default_factory=list)
     pinned: bool = False
+    app_id: str = ''          # set when the program's windows belong to several apps (Overwolf's): this one's
 
 
 def window_title(hwnd) -> str:
@@ -589,6 +590,66 @@ def _premultiply(data: bytes) -> bytes:
             out[n + 1] = out[n + 1] * a // 255
             out[n + 2] = out[n + 2] * a // 255
     return bytes(out)
+
+
+shell32.SHDefExtractIconW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.UINT, ctypes.c_void_p,
+                                      ctypes.c_void_p, wintypes.UINT]
+shell32.SHDefExtractIconW.restype = ctypes.c_long
+user32.DestroyIcon.argtypes = [wintypes.HANDLE]
+
+
+def file_icon(path: str, index: int, size: int) -> int:
+    """Icon number index (or resource id, if negative) of a program, library or .ico file, drawn at
+    size pixels: an HICON the caller destroys with destroy_icon, or 0."""
+    large = wintypes.HANDLE()
+    try:
+        if shell32.SHDefExtractIconW(path, index, 0, ctypes.byref(large), None, size & 0xFFFF) != 0:
+            return 0
+    except OSError:
+        return 0
+    return large.value or 0
+
+
+def destroy_icon(handle: int) -> None:
+    if handle:
+        user32.DestroyIcon(handle)
+
+
+def icon_beside(path: str, dark: bool = False) -> str:
+    """An .ico file next to a program and named as it is (ask-browser.ico by ask_browser.exe), or '';
+    in dark mode its -dark one if it ships one, as such a program shows on its windows then.
+    Some programs carry only a placeholder icon in the file and ship their real one this way."""
+    folder, name = os.path.split(path)
+
+    def plain(text: str) -> str:
+        return text.lower().replace('-', '_').replace(' ', '_')
+    stem = plain(os.path.splitext(name)[0])
+    try:
+        icons = {plain(os.path.splitext(other)[0]): other for other in os.listdir(folder)
+                 if other.lower().endswith('.ico')}
+    except OSError:
+        return ''
+    for wanted in ((stem + '_dark', stem) if dark else (stem,)):
+        if wanted in icons:
+            return os.path.join(folder, icons[wanted])
+    return ''
+
+
+_window_ids: dict[int, str] = {}
+
+
+def window_app_ids(windows: list['Window']) -> dict[int, str]:
+    """Each window's own AppUserModelID ('' when it sets none), kept per window while it is open."""
+    alive = {w.hwnd for w in windows}
+    for hwnd in [h for h in _window_ids if h not in alive]:
+        del _window_ids[hwnd]
+    for window in windows:
+        if window.hwnd not in _window_ids:
+            try:
+                _window_ids[window.hwnd] = window_app_id(window.hwnd)
+            except OSError:
+                _window_ids[window.hwnd] = ''
+    return {w.hwnd: _window_ids[w.hwnd] for w in windows}
 
 
 def foreground() -> int:
