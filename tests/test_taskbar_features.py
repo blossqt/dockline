@@ -2637,6 +2637,10 @@ class AppIconTests(Temp):
         (self.folder / 'other.ico').write_bytes(b'')
         self.assertEqual(win.icon_beside(str(program)).lower(), str(self.folder / 'ask-browser.ico').lower())
         self.assertEqual(win.icon_beside(str(self.folder / 'none.exe')), '')
+        (self.folder / 'ask-browser-dark.ico').write_bytes(b'')
+        self.assertEqual(win.icon_beside(str(program), dark=True).lower(),
+                         str(self.folder / 'ask-browser-dark.ico').lower())
+        self.assertEqual(win.icon_beside(str(program)).lower(), str(self.folder / 'ask-browser.ico').lower())
 
     def test_apps_inside_one_program_get_tiles_of_their_own(self):
         host = r'C:\Program Files (x86)\Overwolf\Overwolf.exe'

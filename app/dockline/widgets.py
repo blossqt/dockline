@@ -900,7 +900,7 @@ class AppsTile(Tile):
             if not found.isNull() and found.width() >= size * ratio * 0.5:
                 pixmap = found
             if pixmap is not None and small_only(icon):  # often a build tool's placeholder
-                better = self.file_pixmap(win.icon_beside(path), 0, size, ratio)
+                better = self.file_pixmap(win.icon_beside(path, _theme.is_dark()), 0, size, ratio)
                 if better is not None and better.width() >= pixels * 0.75:
                     pixmap = better
                 elif group.windows:

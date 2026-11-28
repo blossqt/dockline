@@ -615,19 +615,23 @@ def destroy_icon(handle: int) -> None:
         user32.DestroyIcon(handle)
 
 
-def icon_beside(path: str) -> str:
-    """An .ico file next to a program and named as it is (ask-browser.ico by ask_browser.exe), or ''.
+def icon_beside(path: str, dark: bool = False) -> str:
+    """An .ico file next to a program and named as it is (ask-browser.ico by ask_browser.exe), or '';
+    in dark mode its -dark one if it ships one, as such a program shows on its windows then.
     Some programs carry only a placeholder icon in the file and ship their real one this way."""
     folder, name = os.path.split(path)
-    stem = os.path.splitext(name)[0].lower().replace('-', '_').replace(' ', '_')
+
+    def plain(text: str) -> str:
+        return text.lower().replace('-', '_').replace(' ', '_')
+    stem = plain(os.path.splitext(name)[0])
     try:
-        names = os.listdir(folder)
+        icons = {plain(os.path.splitext(other)[0]): other for other in os.listdir(folder)
+                 if other.lower().endswith('.ico')}
     except OSError:
         return ''
-    for other in names:
-        base, ext = os.path.splitext(other)
-        if ext.lower() == '.ico' and base.lower().replace('-', '_').replace(' ', '_') == stem:
-            return os.path.join(folder, other)
+    for wanted in ((stem + '_dark', stem) if dark else (stem,)):
+        if wanted in icons:
+            return os.path.join(folder, icons[wanted])
     return ''
 
 
