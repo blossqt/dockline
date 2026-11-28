@@ -1211,20 +1211,35 @@ class AppsTile(Tile):
         if index < 0:
             return
         group = self.groups[index]
+        if len(group.windows) <= 1:
+            shell = win.shell_panel(self.front_at_press) if not self.dock.testing else 0
+            if shell:                      # Start or Search open: Windows keeps the app behind it
+                self.dock.after_shell(shell, lambda key=self.keys[index]: self.open_app(key))
+            else:
+                self.open_app(self.keys[index])
+        elif self.previews() is not None:                 # several: their previews, as on hover
+            self.dwell.stop()
+            self.show_previews(index)
+        else:
+            self.list_windows(group, index)
+        QTimer.singleShot(150, self.refresh)
+
+    def open_app(self, key: str) -> None:
+        """A click on an app with one window or none: start it, bring its window to the front, or
+        minimise that window if it was in front already, as the taskbar does."""
+        if key not in self.keys:
+            return
+        index = self.keys.index(key)
+        group = self.groups[index]
         if not group.windows:
             _open(group.path)
-            self.launch(self.keys[index])
+            self.launch(key)
         elif len(group.windows) == 1:
             window = group.windows[0]
             if self.front_at_press == window.hwnd and not win.is_minimised(window.hwnd):
                 win.minimise(window.hwnd)
             else:
                 win.activate(window.hwnd)
-        elif self.previews() is not None:                 # several: their previews, as on hover
-            self.dwell.stop()
-            self.show_previews(index)
-        else:
-            self.list_windows(group, index)
         QTimer.singleShot(150, self.refresh)
 
     def list_windows(self, group: win.Group, index: int):
