@@ -2601,6 +2601,71 @@ class AppIconTests(Temp):
         self.assertEqual(list(win._premultiply(straight)), [100, 50, 25, 128, 0, 0, 0, 255, 0, 0, 0, 0])
         self.assertTrue(win._premultiplied(bytes([100, 50, 25, 128, 9, 9, 9, 255])))
 
+    def shortcut_with_icon(self, name: str, icon: str, index: int = 0) -> str:
+        """A shortcut file that names no target, only where its icon is (as File Explorer's pin)."""
+        import struct
+        text = icon.encode('utf-16-le')
+        header = bytearray(0x4C)
+        struct.pack_into('<I', header, 0, 0x4C)
+        struct.pack_into('<I', header, 20, 0x40 | 0x80)                 # HasIconLocation, IsUnicode
+        struct.pack_into('<i', header, 0x38, index)
+        path = self.folder / name
+        path.write_bytes(bytes(header) + struct.pack('<H', len(icon)) + text + b'\0\0\0\0')
+        return str(path)
+
+    def test_shortcuts_tell_where_their_icon_is(self):
+        path = self.shortcut_with_icon('Files.lnk', '%windir%\\explorer.exe', 3)
+        found = shortcuts.read(path)
+        self.assertEqual(found.icon.lower(), os.path.expandvars('%windir%\\explorer.exe').lower())
+        self.assertEqual(found.icon_index, 3)
+
+    def test_pinned_shortcut_shows_its_icon_large_and_without_an_arrow(self):
+        path = self.shortcut_with_icon('File Explorer.lnk', '%windir%\\explorer.exe')
+        dock = self.make()
+        tile = self.apps(dock)
+        pixmap = tile.icon_for(win.Group(path, pinned=True))
+        self.assertIsNotNone(pixmap)
+        from dockline import motion
+        wanted = round(round(dock.tile_height * motion.MAGNIFY * tile.ICON) * tile.devicePixelRatioF())
+        self.assertEqual(pixmap.width(), wanted)          # the shell's own was 32 px with an arrow
+        dock.deleteLater()
+
+    def test_an_ico_beside_a_program_is_found(self):
+        program = self.folder / 'ask_browser.exe'
+        program.write_bytes(b'MZ')
+        (self.folder / 'ask-browser.ico').write_bytes(b'')
+        (self.folder / 'other.ico').write_bytes(b'')
+        self.assertEqual(win.icon_beside(str(program)).lower(), str(self.folder / 'ask-browser.ico').lower())
+        self.assertEqual(win.icon_beside(str(self.folder / 'none.exe')), '')
+
+    def test_apps_inside_one_program_get_tiles_of_their_own(self):
+        host = r'C:\Program Files (x86)\Overwolf\Overwolf.exe'
+        windows = [win.Window(501, 'Overwolf', 5, host), win.Window(502, 'Tracker', 5, host),
+                   win.Window(503, 'Overwolf 2', 5, host), win.Window(504, 'Edge', 6, r'C:\e\msedge.exe')]
+        ids = {501: '', 502: 'overwolf.tracker', 503: '', 504: 'MSEdge'}
+        self.patched(window_app_ids=lambda found: {w.hwnd: ids[w.hwnd] for w in found},
+                     app_windows=lambda pid: windows)
+        dock = self.make()
+        tile = self.apps(dock)
+        self.assertEqual(tile.app_ids_apart(windows), {502: 'overwolf.tracker'})
+        tile.refresh()
+        apart = [g for g in tile.groups if g.app_id]
+        self.assertEqual([[w.hwnd for w in g.windows] for g in apart], [[502]])
+        self.assertEqual(len(tile.groups), 3)
+        dock.deleteLater()
+
+    def test_an_app_inside_another_program_shows_its_windows_large_icon(self):
+        explorer = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'), 'explorer.exe')
+        handle = win.file_icon(explorer, 0, 64)
+        self.addCleanup(win.destroy_icon, handle)
+        self.patched(app_id_of=lambda window: ('overwolf.tracker', False), app_id_image=lambda app_id, size: None,
+                     window_icon=lambda hwnd: handle)
+        dock = self.make()
+        tile = self.apps(dock)
+        pixmap = tile.icon_for(win.Group(explorer, [win.Window(601, 'Tracker', 9, explorer)]))
+        self.assertEqual(pixmap.width(), 64)              # the window's, not the program file's
+        dock.deleteLater()
+
     def test_only_small_icons_are_told_apart(self):
         from PySide6.QtCore import QRect
         from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
